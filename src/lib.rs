@@ -90,6 +90,7 @@ pub mod storage;
 pub mod zk;
 pub mod temp_governance;
 pub mod security;
+pub mod flash_loan_guard;
 pub mod upgrades;
 pub mod validation;
 use crate::governance::{
@@ -164,22 +165,25 @@ pub enum ContractError {
     InsufficientBondForPenalty = 46,
     SlippageExceeded = 47,
     AmountTooLow = 48,
-    NullifierAlreadyUsed = 48,
-    InvalidProof = 49,
-    BridgeAssetNotRegistered = 50,
-    BridgeInvalidMaxSupply = 51,
-    BridgeAssetAlreadyRegistered = 52,
-    BridgeInvalidAmount = 53,
-    BridgeNotController = 54,
-    BridgeSupplyCapExceeded = 55,
-    BridgeInsufficientBalance = 56,
-    BridgeEscrowNotConfigured = 57,
-    /// Reentrancy guard detected a reentrant call during execution.
-    ReentrancyDetected = 58,
-    MerkleTreeFull = 59,
     NullifierAlreadyUsed = 49,
     InvalidProof = 50,
+    /// Invalid input parameters were supplied to a contract function.
+    InvalidInput = 45,
+    BridgeAssetNotRegistered = 51,
+    BridgeInvalidMaxSupply = 52,
+    BridgeAssetAlreadyRegistered = 53,
+    BridgeInvalidAmount = 54,
+    BridgeNotController = 55,
+    BridgeSupplyCapExceeded = 56,
+    BridgeInsufficientBalance = 57,
+    BridgeEscrowNotConfigured = 58,
+    /// Reentrancy guard detected a reentrant call during execution.
     ReentrancyDetected = 59,
+    MerkleTreeFull = 60,
+    /// Flash loan arbitrage detected: post-transaction pool state violates
+    /// reserve-ratio, k-invariant, or liquidity-depth safety threshold.
+    /// Closes #757.
+    FlashLoanArbitrageDetected = 61,
 }
 
 impl ContractError {
