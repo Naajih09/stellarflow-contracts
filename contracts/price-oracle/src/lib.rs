@@ -597,6 +597,7 @@ pub trait StellarFlowTrait {
     /// Returns `Error::SlippageToleranceExceeded` if output is below acceptable minimum
     fn execute_swap_with_dynamic_slippage(
         env: Env,
+        sender: Address,
         from_asset: Symbol,
         to_asset: Symbol,
         amount_in: i128,
@@ -609,6 +610,7 @@ pub trait StellarFlowTrait {
     /// Bypasses dynamic slippage calculation and uses a fixed tolerance specified by the caller.
     ///
     /// # Arguments
+    /// * `sender` - Address initiating the swap
     /// * `from_asset` - Source asset symbol
     /// * `to_asset` - Destination asset symbol
     /// * `amount_in` - Amount to swap
@@ -618,6 +620,7 @@ pub trait StellarFlowTrait {
     /// Actual output amount if swap succeeds
     fn execute_swap_with_manual_slippage(
         env: Env,
+        sender: Address,
         from_asset: Symbol,
         to_asset: Symbol,
         amount_in: i128,
