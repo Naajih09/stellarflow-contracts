@@ -192,6 +192,8 @@ pub enum ContractError {
     ProposalNotFound = 61,
     ProposalNotVetoable = 62,
     ProposalAlreadyVetoed = 63,
+    /// Constant-product invariant violated: k_new < k_old after a swap.
+    InvariantViolation = 64,
 }
 
 impl ContractError {
