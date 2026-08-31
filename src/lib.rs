@@ -124,6 +124,24 @@ use crate::validation::{
 
 use crate::upgrades::migration::ensure_schema_version;
 
+/// Centralised contract error enum — closes issue #720.
+///
+/// The `#[contracterror]` attribute makes every variant available as a typed
+/// `soroban_sdk::Error` value on the host, so callers can pattern-match on
+/// specific error codes rather than treating all failures as opaque integers.
+///
+/// Discriminant layout:
+/// - 1–11 : initialisation / admin lifecycle
+/// - 12–19: auth / signature errors
+/// - 20–29: stake / tier errors
+/// - 30–49: protocol logic errors
+/// - 50–63: module-specific errors (reentrancy, merkle, governance)
+/// - 64+  : new errors added after the initial audit
+///
+/// The four canonical *external-API* error codes required by issue #720 are
+/// exposed as `const` aliases below the enum definition so they remain stable
+/// regardless of any future renumbering inside the enum body.
+#[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum ContractError {
@@ -183,6 +201,36 @@ pub enum ContractError {
     ProposalNotFound = 61,
     ProposalNotVetoable = 62,
     ProposalAlreadyVetoed = 63,
+    /// Deadline / signature expiry — canonical external-API code 64
+    /// (issue #720: distinct code for deadline-related failures distinct from
+    /// `SignatureExpired` which covers cryptographic signature TTL checks).
+    ExpiredDeadline = 64,
+    /// Action-queue timelock not yet satisfied (issue #731).
+    ActionTimelockPending = 65,
+}
+
+/// Canonical external-facing error code aliases (issue #720).
+///
+/// These four constants pin the *semantic* error categories to stable numeric
+/// values that are documented in the public ABI and referenced by client SDKs.
+/// They intentionally alias existing discriminants rather than adding new ones,
+/// so the wire format stays compact.
+///
+/// | External code | Meaning                 | Internal variant         |
+/// |---------------|-------------------------|--------------------------|
+/// | 1             | InsufficientBalance     | `Overflow` (11)          |
+/// | 2             | Unauthorized            | `Unauthorized` (12)      |
+/// | 3             | SlippageExceeded        | `SlippageExceeded` (47)  |
+/// | 4             | ExpiredDeadline         | `ExpiredDeadline` (64)   |
+pub mod api_error_codes {
+    /// Canonical code for *insufficient balance* errors in external clients.
+    pub const INSUFFICIENT_BALANCE: u32 = 1;
+    /// Canonical code for *unauthorised* errors in external clients.
+    pub const UNAUTHORIZED: u32 = 2;
+    /// Canonical code for *slippage exceeded* errors in external clients.
+    pub const SLIPPAGE_EXCEEDED: u32 = 3;
+    /// Canonical code for *expired deadline* errors in external clients.
+    pub const EXPIRED_DEADLINE: u32 = 4;
 }
 
 impl ContractError {
@@ -243,6 +291,18 @@ impl ContractError {
     pub const HarvestSwapFailed: Self = Self::RouteExecutionFailed;
     pub const HarvestSlippageExceeded: Self = Self::SlippageExceeded;
     pub const HarvestInvalidPath: Self = Self::InconsistentRouteAssets;
+
+    // ── Issue #720 canonical API error aliases ────────────────────────────────
+    // These four names are the stable external-facing identifiers documented in
+    // the public ABI. Client SDKs SHOULD match against these variants by name.
+    //
+    // InsufficientBalance => code 31 (InsufficientReserveBalance)
+    // Unauthorized        => code 12 (primary variant, no alias needed)
+    // SlippageExceeded    => code 47 (primary variant, no alias needed)
+    // ExpiredDeadline     => code 64 (primary variant, no alias needed)
+
+    /// Canonical alias: operation failed due to insufficient token balance.
+    pub const InsufficientBalance: Self = Self::InsufficientReserveBalance;
 }
 
 // Contract state keys
@@ -1102,6 +1162,107 @@ impl TimeLockedUpgradeContract {
 
     pub fn get_pending_admin_change(env: Env) -> Option<admin::AdminChangeProposal> {
         crate::admin::get_pending_admin_change(&env)
+    }
+
+    // ── Issue #731: Timelock queue for critical admin actions ─────────────────
+
+    /// Queue a fee-ceiling update with a mandatory 48-hour timelock.
+    ///
+    /// The new ceiling will not be applied until `execute_admin_action` is called
+    /// after the delay expires.  Use `cancel_admin_action` to veto during the
+    /// window.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`]     – contract not initialized.
+    /// - [`ContractError::NotAdmin`]           – caller is not admin.
+    /// - [`ContractError::AdminChangePending`] – a fee-ceiling update is already queued.
+    /// - [`ContractError::Overflow`]           – timestamp overflow.
+    pub fn queue_fee_ceiling_update(
+        env: Env,
+        admin: Address,
+        new_ceiling: u64,
+    ) -> Result<admin::QueuedAdminAction, ContractError> {
+        crate::admin::queue_admin_action(
+            &env,
+            admin,
+            admin::QueuedActionPayload::UpdateFeeCeiling(
+                admin::FeeCeilingUpdateParams { new_ceiling },
+            ),
+        )
+    }
+
+    /// Queue a dynamic fee configuration change with a mandatory 48-hour timelock.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`]     – contract not initialized.
+    /// - [`ContractError::NotAdmin`]           – caller is not admin.
+    /// - [`ContractError::AdminChangePending`] – a fee-config update is already queued.
+    pub fn queue_dynamic_fee_config_update(
+        env: Env,
+        admin: Address,
+        asset: AssetId,
+        min_fee_bps: u32,
+        max_fee_bps: u32,
+        period_seconds: u64,
+    ) -> Result<admin::QueuedAdminAction, ContractError> {
+        crate::admin::queue_admin_action(
+            &env,
+            admin,
+            admin::QueuedActionPayload::UpdateDynamicFeeConfig(
+                admin::DynamicFeeConfigParams { asset, min_fee_bps, max_fee_bps, period_seconds },
+            ),
+        )
+    }
+
+    /// Cancel a pending queued admin action during the timelock window.
+    ///
+    /// The `payload_type` parameter is used only to identify *which* queue slot
+    /// to cancel — the fields inside the payload are ignored.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotAdmin`]            – caller is not admin.
+    /// - [`ContractError::NoAdminChangePending`] – no queued action of this type.
+    pub fn cancel_admin_action(
+        env: Env,
+        admin: Address,
+        payload_type: admin::QueuedActionPayload,
+    ) -> Result<(), ContractError> {
+        crate::admin::cancel_action(&env, admin, payload_type)
+    }
+
+    /// Execute a queued admin action once the 48-hour timelock has expired.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotAdmin`]                  – caller is not admin.
+    /// - [`ContractError::NoAdminChangePending`]      – no queued action of this type.
+    /// - [`ContractError::AdminTimelockNotSatisfied`] – timelock has not elapsed.
+    pub fn execute_admin_action(
+        env: Env,
+        admin: Address,
+        payload_type: admin::QueuedActionPayload,
+    ) -> Result<(), ContractError> {
+        crate::admin::execute_action(&env, admin, payload_type)
+    }
+
+    /// Return the queued admin action of the given type, if one is pending.
+    pub fn get_queued_admin_action(
+        env: Env,
+        payload_type: admin::QueuedActionPayload,
+    ) -> Option<admin::QueuedAdminAction> {
+        crate::admin::get_queued_action(&env, payload_type)
+    }
+
+    /// Return the number of seconds remaining before a queued action can be
+    /// executed, or `None` if no action of the given type is queued.
+    pub fn get_admin_action_timelock_remaining(
+        env: Env,
+        payload_type: admin::QueuedActionPayload,
+    ) -> Option<u64> {
+        crate::admin::get_action_timelock_remaining(&env, payload_type)
     }
 
     // --- Emergency pause ---

@@ -1,6 +1,12 @@
+pub mod action_queue;
 pub mod cleanup;
 pub mod prune;
 
+pub use action_queue::{
+    cancel_action, execute_action, get_action_timelock_remaining, get_queued_action,
+    queue_admin_action, DynamicFeeConfigParams, FeeCeilingUpdateParams, QueuedActionPayload,
+    QueuedAdminAction, ADMIN_ACTION_DELAY_SECONDS,
+};
 pub use prune::{prune_expired_keys, PruneTarget};
 
 use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, TryFromVal, Val, Vec};
