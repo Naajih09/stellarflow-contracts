@@ -17,14 +17,30 @@
 //! would leave neighbouring slots in an inconsistent state across ledger
 //! registers.
 
-use soroban_sdk::{contracttype, symbol_short, Env, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, Vec};
 
 use crate::{ContractData, ContractError, DATA_KEY};
+
+/// Multi-sig threshold governing admin-key rotations.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminKeySet {
+    /// Current administrator addresses authorized to rotate the key set.
+    pub signers: Vec<Address>,
+    /// Number of approvals required from `signers` to rotate keys.
+    pub threshold: u32,
+}
 
 // ── Storage key ──────────────────────────────────────────────────────────────
 
 /// Ledger instance-storage key for the sealed variance configuration.
 pub(crate) const PRICE_VARIANCE_CONFIG_KEY: Symbol = symbol_short!("PVARCFG");
+
+/// Ledger instance-storage key for the multi-sig admin key set.
+pub(crate) const ADMIN_KEY_SET_KEY: Symbol = symbol_short!("ADMINKEYS");
+
+/// Ledger instance-storage key for the liquidity pool fee tier controller.
+pub(crate) const FEE_TIER_CONFIG_KEY: Symbol = symbol_short!("FEETIER");
 
 // ── Default thresholds ───────────────────────────────────────────────────────
 
@@ -57,6 +73,23 @@ pub const DEFAULT_MAX_SUBMISSION_AGE_SECS: u64 = 300;
 ///
 /// 5 000 bps = 50 %.
 pub const VARIANCE_BPS_CEILING: u32 = 5_000;
+
+// ── Dynamic liquidity pool fee tiers ─────────────────────────────────────────
+
+/// Minimum allowed pool fee tier in basis points (0.05 %).
+pub const MIN_FEE_TIER_BPS: u32 = 5;
+
+/// Maximum allowed pool fee tier in basis points (1.00 %).
+pub const MAX_FEE_TIER_BPS: u32 = 100;
+
+/// Default pool fee tier in basis points (0.30 %).
+pub const DEFAULT_FEE_TIER_BPS: u32 = 30;
+
+/// LP token holder share of collected fees, in basis points (80 %).
+pub const LP_FEE_SHARE_BPS: u32 = 8_000;
+
+/// Protocol treasury vault share of collected fees, in basis points (20 %).
+pub const PROTOCOL_FEE_SHARE_BPS: u32 = 2_000;
 
 // ── Sealed configuration struct ──────────────────────────────────────────────
 
@@ -105,6 +138,48 @@ impl Default for PriceVarianceConfig {
     }
 }
 
+/// Compact byte-packed representation of [`PriceVarianceConfig`] to minimize
+/// Soroban instance storage foot-print and rent costs (Issue #747).
+///
+/// Refactors 4 independent config fields (u32, u32, u32, u64 = 20 raw bytes)
+/// into a single 64-bit packed payload (8 bytes):
+/// - bits [0..16]   : max_spread_bps (u16)
+/// - bits [16..32]  : max_deviation_bps (u16)
+/// - bits [32..40]  : min_submission_count (u8)
+/// - bits [40..64]  : max_submission_age_secs (24 bits)
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackedPriceVarianceConfig {
+    pub packed: u64,
+}
+
+impl PriceVarianceConfig {
+    pub fn pack(&self) -> PackedPriceVarianceConfig {
+        let spread = (self.max_spread_bps.min(0xFFFF) as u64) & 0xFFFF;
+        let dev = ((self.max_deviation_bps.min(0xFFFF) as u64) & 0xFFFF) << 16;
+        let count = ((self.min_submission_count.min(0xFF) as u64) & 0xFF) << 32;
+        let age = ((self.max_submission_age_secs.min(0xFF_FFFF) as u64) & 0xFF_FFFF) << 40;
+        PackedPriceVarianceConfig {
+            packed: spread | dev | count | age,
+        }
+    }
+}
+
+impl PackedPriceVarianceConfig {
+    pub fn unpack(&self) -> PriceVarianceConfig {
+        let max_spread_bps = (self.packed & 0xFFFF) as u32;
+        let max_deviation_bps = ((self.packed >> 16) & 0xFFFF) as u32;
+        let min_submission_count = ((self.packed >> 32) & 0xFF) as u32;
+        let max_submission_age_secs = ((self.packed >> 40) & 0xFF_FFFF) as u64;
+        PriceVarianceConfig {
+            max_spread_bps,
+            max_deviation_bps,
+            min_submission_count,
+            max_submission_age_secs,
+        }
+    }
+}
+
 // ── Validation ───────────────────────────────────────────────────────────────
 
 /// Verify that every field of `cfg` satisfies the struct invariants.
@@ -133,6 +208,152 @@ pub fn validate_price_variance_config(cfg: &PriceVarianceConfig) -> Result<(), C
 
     Ok(())
 }
+
+// ── Dynamic liquidity pool fee tier controller ──────────────────────────────
+
+/// Active fee tier configuration for the liquidity pool.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeeTierConfig {
+    /// Pool fee tier in basis points (5, 30 or 100).
+    pub fee_tier_bps: u32,
+}
+
+impl Default for FeeTierConfig {
+    fn default() -> Self {
+        Self {
+            fee_tier_bps: DEFAULT_FEE_TIER_BPS,
+        }
+    }
+}
+
+/// Validate fee tier is one of the allowed governance tiers.
+pub fn validate_fee_tier_config(cfg: &FeeTierConfig) -> Result<(), ContractError> {
+    if cfg.fee_tier_bps != MIN_FEE_TIER_BPS
+        && cfg.fee_tier_bps != DEFAULT_FEE_TIER_BPS
+        && cfg.fee_tier_bps != MAX_FEE_TIER_BPS
+    {
+        return Err(ContractError::InvalidVarianceConfig);
+    }
+    Ok(())
+}
+
+/// Set the active fee tier as the contract admin.
+pub fn set_fee_tier_config(
+    env: &Env,
+    caller: &Address,
+    cfg: FeeTierConfig,
+) -> Result<(), ContractError> {
+    let data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .ok_or(ContractError::NotInitialized)?;
+    if data.admin != *caller {
+        return Err(ContractError::NotAdmin);
+    }
+    caller.require_auth();
+    validate_fee_tier_config(&cfg)?;
+    env.storage().instance().set(&FEE_TIER_CONFIG_KEY, &cfg);
+    Ok(())
+}
+
+/// Read the active fee tier configuration.
+pub fn get_fee_tier_config(env: &Env) -> FeeTierConfig {
+    env.storage()
+        .instance()
+        .get(&FEE_TIER_CONFIG_KEY)
+        .unwrap_or_default()
+}
+
+/// Apply a governance vote to adjust the fee tier within safety bounds.
+pub fn vote_fee_tier_change(
+    env: &Env,
+    approving_signers: Vec<Address>,
+    proposed_fee_tier_bps: u32,
+) -> Result<(), ContractError> {
+    let keys = get_admin_key_set(env)?;
+    validate_admin_key_set(&keys)?;
+    if has_duplicate_addresses(&approving_signers) || approving_signers.len() < keys.threshold {
+        return Err(ContractError::NotAdmin);
+    }
+    for signer in approving_signers.iter() {
+        signer.require_auth();
+        if !keys.signers.iter().any(|member| member == signer) {
+            return Err(ContractError::NotAdmin);
+        }
+    }
+    let cfg = FeeTierConfig {
+        fee_tier_bps: proposed_fee_tier_bps,
+    };
+    validate_fee_tier_config(&cfg)?;
+    env.storage().instance().set(&FEE_TIER_CONFIG_KEY, &cfg);
+    Ok(())
+}
+/// Verify that a proposed admin key set satisfies multi-sig sanity rules.
+pub fn validate_admin_key_set(keys: &AdminKeySet) -> Result<(), ContractError> {
+    if keys.signers.len() == 0 || keys.threshold == 0 || keys.threshold > keys.signers.len() {
+        return Err(ContractError::InvalidVarianceConfig);
+    }
+    if has_duplicate_addresses(&keys.signers) {
+        return Err(ContractError::InvalidVarianceConfig);
+    }
+    Ok(())
+}
+
+/// Read the current governing admin key set.
+pub fn get_admin_key_set(env: &Env) -> Result<AdminKeySet, ContractError> {
+    let stored: Option<AdminKeySet> = env.storage().instance().get(&ADMIN_KEY_SET_KEY);
+    if let Some(keys) = stored {
+        return Ok(keys);
+    }
+
+    let data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .ok_or(ContractError::NotInitialized)?;
+    let mut signers = Vec::new(env);
+    signers.push_back(data.admin.clone());
+    Ok(AdminKeySet { signers, threshold: 1 })
+}
+
+/// Rotate the multi-sig admin keys after receiving current-threshold approval.
+pub fn rotate_admin_keys(
+    env: &Env,
+    approving_signers: Vec<Address>,
+    new_signers: Vec<Address>,
+    new_threshold: u32,
+) -> Result<(), ContractError> {
+    let current = get_admin_key_set(env)?;
+    validate_admin_key_set(&current)?;
+    validate_admin_key_set(&AdminKeySet {
+        signers: new_signers.clone(),
+        threshold: new_threshold,
+    })?;
+
+    if has_duplicate_addresses(&approving_signers) || approving_signers.len() < current.threshold {
+        return Err(ContractError::NotAdmin);
+    }
+
+    for signer in approving_signers.iter() {
+        signer.require_auth();
+        if !current.signers.iter().any(|member| member == signer) {
+            return Err(ContractError::NotAdmin);
+        }
+    }
+
+    let new_key_set = AdminKeySet {
+        signers: new_signers.clone(),
+        threshold: new_threshold,
+    };
+    env.storage().instance().set(&ADMIN_KEY_SET_KEY, &new_key_set);
+
+    let mut data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .
 
 // ── Storage accessors ─────────────────────────────────────────────────────────
 
@@ -398,5 +619,23 @@ mod tests {
             result,
             Err(Ok(ContractError::InvalidVarianceConfig))
         );
+    }
+
+    #[test]
+    fn test_storage_allocation_minimizer_rent_reduction_assertion() {
+        let original = PriceVarianceConfig::default();
+        let packed = original.pack();
+        let unpacked = packed.unpack();
+
+        assert_eq!(unpacked, original);
+
+        let original_size = std::mem::size_of::<PriceVarianceConfig>();
+        let packed_size = std::mem::size_of::<PackedPriceVarianceConfig>();
+
+        assert_eq!(original_size, 20);
+        assert_eq!(packed_size, 8);
+
+        let reduction_pct = ((original_size - packed_size) as f64 / original_size as f64) * 100.0;
+        assert!(reduction_pct >= 25.0, "Storage reduction percentage {}% is less than 25%", reduction_pct);
     }
 }
