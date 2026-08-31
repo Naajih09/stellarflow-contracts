@@ -1710,3 +1710,43 @@ fn test_zk_merkle_deposit_and_withdrawal_flow() {
     assert_eq!(verify_res, true);
 }
 
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::testutils::Ledger;
+    use soroban_sdk::{Env, Address};
+
+    #[test]
+    fn test_strict_ttl_extension_survival() {
+        let env = Env::default();
+        
+        // 1. Setup a test key
+        let test_address = Address::generate(&env);
+        let key = DataKey::Subscription(test_address.clone());
+        
+        // 2. Set data in persistent storage
+        env.storage().persistent().set(&key, &true);
+        
+        // 3. Initial extension
+        extend_persistent_ttl(&env, &key);
+
+        // 4. Simulate a jump in time to just before the threshold
+        // Current ledger is 0, bump was 100k. Jump to 95k.
+        env.ledger().set_sequence(95_000);
+        
+        // Verify data still exists
+        assert!(env.storage().persistent().has(&key));
+
+        // 5. Trigger another extension
+        // Since 95k is within the 10k threshold of the 100k expiry, it bumps again
+        extend_persistent_ttl(&env, &key);
+
+        // 6. Jump to 150k ledgers
+        // Without the second bump, it would have expired at 100k.
+        env.ledger().set_sequence(150_000);
+
+        // Assert survival
+        assert!(env.storage().persistent().has(&key), "Storage key should have survived via bump");
+    }
+}
+
