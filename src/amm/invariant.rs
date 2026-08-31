@@ -107,6 +107,64 @@ fn mul_div(numerator: u128, denominator: u128, divisor: u128) -> Result<u128, Co
     Ok(quot)
 }
 
+/// Supported pool fee tiers in basis points.
+pub const FEE_TIER_0_05_BPS: u64 = 5;
+pub const FEE_TIER_0_30_BPS: u64 = 30;
+pub const FEE_TIER_1_00_BPS: u64 = 100;
+
+/// Minimum and maximum fee tiers that governance may select.
+pub const MIN_FEE_TIER_BPS: u64 = FEE_TIER_0_05_BPS;
+pub const MAX_FEE_TIER_BPS: u64 = FEE_TIER_1_00_BPS;
+
+/// LP / treasury fee split: 80% to LP holders, 20% to protocol treasury.
+pub const LP_FEE_SHARE_BPS: u64 = 8_000;
+pub const TREASURY_FEE_SHARE_BPS: u64 = 2_000;
+
+/// Validate that a proposed fee tier is one of the supported configurable tiers.
+pub fn validate_fee_tier(fee_bps: u64) -> Result<(), ContractError> {
+    if matches!(fee_bps, FEE_TIER_0_05_BPS | FEE_TIER_0_30_BPS | FEE_TIER_1_00_BPS) {
+        Ok(())
+    } else {
+        Err(ContractError::InvalidInput)
+    }
+}
+
+/// Apply a governance vote to adjust the pool fee tier parameter.
+///
+/// The vote result must be a supported fee tier inside the bounded safety range.
+pub fn apply_governance_fee_tier(voted_fee_bps: u64) -> Result<u64, ContractError> {
+    validate_fee_tier(voted_fee_bps)?;
+    Ok(voted_fee_bps)
+}
+
+/// Controller for the pool's configurable fee tier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeeTierController {
+    pub current_fee_bps: u64,
+}
+
+impl FeeTierController {
+    pub fn new(fee_bps: u64) -> Result<Self, ContractError> {
+        validate_fee_tier(fee_bps)?;
+        Ok(Self { current_fee_bps: fee_bps })
+    }
+
+    pub fn governance_adjust(&mut self, voted_fee_bps: u64) -> Result<u64, ContractError> {
+        let new_fee_bps = apply_governance_fee_tier(voted_fee_bps)?;
+        self.current_fee_bps = new_fee_bps;
+        Ok(new_fee_bps)
+    }
+}
+
+/// Split a collected fee between LP token holders (80%) and the protocol treasury (20%).
+///
+/// Rounding truncates in favor of LPs when fee_amount is not divisible by 5.
+pub fn split_pool_fee(fee_amount: u128) -> (u128, u128) {
+    let treasury_share = fee_amount / 5;
+    let lp_share = fee_amount - treasury_share;
+    (lp_share, treasury_share)
+}
+
 /// Compute the output amount for a constant-product swap with dynamic fee deduction.
 ///
 /// First calculates the raw output, then applies the dynamic fee to get the final amount
