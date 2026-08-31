@@ -339,6 +339,12 @@ pub fn cancel_remittance(env: &Env, id: u64, sender: Address) -> Result<(), Cont
     Ok(())
 }
 
+/// Time-lock release trigger permitting the sender to reclaim remittance funds
+/// once the expiration timestamp passes if the recipient anchor failed to deliver fiat.
+pub fn reclaim_expired(env: &Env, id: u64, sender: Address) -> Result<(), ContractError> {
+    cancel_remittance(env, id, sender)
+}
+
 pub fn get_remittance(env: &Env, id: u64) -> Option<RemittanceEscrow> {
     env.storage().persistent().get(&BridgeEscrowStorageKey::Remittance(id))
 }
@@ -410,5 +416,42 @@ mod tests {
         assert_eq!(stored.depositor, depositor);
         assert_eq!(stored.target_chain_id, 7);
         assert_eq!(stored.recipient_address, recipient);
+    }
+
+    #[test]
+    fn reclaim_expired_remittance_returns_funds_after_expiration() {
+        let (env, _client, contract_id, _admin, token, depositor, recipient) = setup();
+        let current_time = env.ledger().timestamp();
+        let expires_at = current_time + 100;
+
+        let escrow = create_remittance(&env, depositor.clone(), recipient.clone(), token.clone(), 1_000, None, 0, expires_at).unwrap();
+        assert_eq!(escrow.id, 0);
+
+        // Before expiration: reclaim_expired fails
+        let result_before = reclaim_expired(&env, escrow.id, depositor.clone());
+        assert!(result_before.is_err());
+
+        // Fast-forward ledger timestamp past expiration
+        env.ledger().set(soroban_sdk::ledger::LedgerInfo {
+            timestamp: expires_at + 1,
+            protocol_version: 20,
+            sequence_number: 100,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 16,
+            min_persistent_entry_ttl: 4096,
+            max_entry_ttl: 6312000,
+        });
+
+        // After expiration: reclaim_expired succeeds
+        let result_after = reclaim_expired(&env, escrow.id, depositor.clone());
+        assert!(result_after.is_ok());
+
+        let stored = get_remittance(&env, escrow.id).unwrap();
+        assert!(stored.refunded);
+
+        let token_client = soroban_sdk::token::Client::new(&env, &token);
+        assert_eq!(token_client.balance(&depositor), 10_000);
+        assert_eq!(token_client.balance(&contract_id), 0);
     }
 }
