@@ -278,6 +278,7 @@ pub struct RevocationProposal {
     pub proposer: Address,
     pub proposed_at: u64,
     pub votes: Vec<Address>,
+    pub ipfs_cid: Bytes,
 }
 
 #[contracttype]
