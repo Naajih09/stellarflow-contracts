@@ -1750,3 +1750,51 @@ mod test {
     }
 }
 
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::{vec, IntoVal};
+
+    #[test]
+    fn test_escrow_auth_and_events() {
+        let e = Env::default();
+        e.mock_all_auths(); // Standard for testing auth
+
+        let sender = Address::generate(&e);
+        let recipient = Address::generate(&e);
+        let token = Address::generate(&e); // Mock token addr
+        
+        let contract_id = e.register_contract(None, RemittanceContract);
+        let client = RemittanceContractClient::new(&e, &contract_id);
+
+        // Create escrow
+        let amount = 1000;
+        let id = client.create_escrow(&sender, &recipient, &token, &amount);
+
+        // Verify Event
+        let last_event = e.events().all().last().unwrap();
+        assert_eq!(
+            last_event,
+            (
+                contract_id.clone(),
+                (symbol_short!("created"), sender.clone(), recipient.clone()).into_val(&e),
+                (id, token.clone(), amount).into_val(&e)
+            )
+        );
+
+        // Claim escrow
+        client.claim_escrow(&id);
+
+        // Verify Claimed Event
+        let last_event = e.events().all().last().unwrap();
+        assert_eq!(
+            last_event,
+            (
+                contract_id,
+                (symbol_short!("claimed"), recipient.clone()).into_val(&e),
+                (id, token, amount).into_val(&e)
+            )
+        );
+    }
+}
