@@ -94,7 +94,11 @@
           "contract_data": {
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
             "key": {
-              "symbol": "HBEAT"
+              "vec": [
+                {
+                  "u32": 3418146798
+                }
+              ]
             },
             "durability": "temporary"
           }
@@ -107,20 +111,15 @@
                 "ext": "v0",
                 "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
                 "key": {
-                  "symbol": "HBEAT"
+                  "vec": [
+                    {
+                      "u32": 3418146798
+                    }
+                  ]
                 },
                 "durability": "temporary",
                 "val": {
-                  "map": [
-                    {
-                      "key": {
-                        "u32": 3418146798
-                      },
-                      "val": {
-                        "u64": 0
-                      }
-                    }
-                  ]
+                  "u64": 0
                 }
               }
             },
@@ -168,6 +167,14 @@
                             },
                             {
                               "key": {
+                                "symbol": "max_fee_ceiling"
+                              },
+                              "val": {
+                                "u64": 10000
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "value"
                               },
                               "val": {
@@ -175,6 +182,14 @@
                               }
                             }
                           ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "symbol": "LASTACT"
+                        },
+                        "val": {
+                          "u64": 0
                         }
                       },
                       {
@@ -224,6 +239,18 @@
                             }
                           ]
                         }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "SchemaVersion"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 2
+                        }
                       }
                     ]
                   }
@@ -232,7 +259,7 @@
             },
             "ext": "v0"
           },
-          105000
+          535680
         ]
       ],
       [
@@ -352,7 +379,7 @@
             },
             "ext": "v0"
           },
-          105000
+          535680
         ]
       ]
     ]

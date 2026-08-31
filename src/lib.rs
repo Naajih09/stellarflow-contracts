@@ -175,16 +175,7 @@ pub enum ContractError {
     InsufficientBondForPenalty = 46,
     SlippageExceeded = 47,
     AmountTooLow = 48,
-    NullifierAlreadyUsed = 48,
     InvalidProof = 49,
-    BridgeAssetNotRegistered = 50,
-    BridgeInvalidMaxSupply = 51,
-    BridgeAssetAlreadyRegistered = 52,
-    BridgeInvalidAmount = 53,
-    BridgeNotController = 54,
-    BridgeSupplyCapExceeded = 55,
-    BridgeInsufficientBalance = 56,
-    BridgeEscrowNotConfigured = 57,
     /// Reentrancy guard detected a reentrant call during execution.
     ReentrancyDetected = 58,
     MerkleTreeFull = 59,
@@ -196,6 +187,7 @@ pub enum ContractError {
 
 impl ContractError {
     pub const MathOverflow: Self = Self::Overflow;
+    pub const NullifierAlreadyUsed: Self = Self::AlreadyRegistered;
     pub const BridgeAssetNotRegistered: Self = Self::NotRegistered;
     pub const BridgeInvalidMaxSupply: Self = Self::Overflow;
     pub const BridgeAssetAlreadyRegistered: Self = Self::AlreadyRegistered;
@@ -246,6 +238,11 @@ impl ContractError {
     pub const RoleNotFound: Self = Self::NotRegistered;
     pub const UnauthorizedReentryAttempt: Self = Self::Unauthorized;
     pub const RoleExpiredOrMissing: Self = Self::Unauthorized;
+    pub const HarvestNothingToCompound: Self = Self::AmountTooLow;
+    pub const HarvestInvalidMinOut: Self = Self::AmountTooLow;
+    pub const HarvestSwapFailed: Self = Self::RouteExecutionFailed;
+    pub const HarvestSlippageExceeded: Self = Self::SlippageExceeded;
+    pub const HarvestInvalidPath: Self = Self::InconsistentRouteAssets;
 }
 
 // Contract state keys
@@ -288,6 +285,7 @@ pub struct RevocationProposal {
 pub struct ContractData {
     pub admin: Address,
     pub value: u64,
+    pub max_fee_ceiling: u64,
 }
 
 #[contracttype]
@@ -360,7 +358,7 @@ impl TimeLockedUpgradeContract {
             return Err(ContractError::AlreadyInitialized);
         }
         admin.require_auth();
-        let data = ContractData { admin: admin.clone(), value: 0 };
+        let data = ContractData { admin: admin.clone(), value: 0, max_fee_ceiling: 10_000 };
         env.storage().instance().set(&DATA_KEY, &data);
         env.storage().instance().set(&TREASURY_KEY, &treasury);
         Ok(())
@@ -663,6 +661,8 @@ impl TimeLockedUpgradeContract {
         get_nonce(&env, &coordinator)
     }
 
+    /// Takes an `AssetId` like its siblings `update_heartbeat` and
+    /// `is_data_fresh`; callers hash a `Symbol` with `symbol_to_asset_id`.
     pub fn get_last_update_timestamp(env: Env, asset: AssetId) -> Option<u64> {
         let heartbeat_key = HeartbeatKey::HeartbeatByAsset(asset);
         env.storage().temporary().get(&heartbeat_key)
@@ -753,6 +753,16 @@ impl TimeLockedUpgradeContract {
     }
     pub fn get_corridor_fee_pool(env: Env, asset: AssetId) -> fees::CorridorFeePool {
         crate::fees::get_corridor_fee_pool(env, asset)
+    }
+
+    pub fn add_corridor_fees(
+        env: Env,
+        admin: Address,
+        asset: AssetId,
+        collected: u64,
+        variable_fee: u64,
+    ) -> Result<fees::CorridorFeePool, ContractError> {
+        crate::fees::add_corridor_fees(env, admin, asset, collected, variable_fee)
     }
 
     pub fn record_lp_fee(
@@ -1282,7 +1292,7 @@ impl TimeLockedUpgradeContract {
     /// Retrieve the veto record for a proposal, if it has been vetoed.
     ///
     /// Returns None if the proposal has not been vetoed.
-    pub fn get_veto_record(env: Env, proposal_id: u64) -> Option<veto::ProposalVeto> {
+    pub fn get_veto_record(env: Env, proposal_id: u64) -> Option<crate::veto::ProposalVeto> {
         veto::get_veto_record(&env, proposal_id)
     }
 
@@ -1536,6 +1546,31 @@ impl TimeLockedUpgradeContract {
         vaults::lp_farming::pending_rewards(&env, user)
     }
 
+    pub fn yield_farming_share_balance(env: Env, user: Address) -> i128 {
+        vaults::lp_farming::get_share_balance(&env, user)
+    }
+
+    // ── Yield farm harvest-compound auto-router (Issue #798) ─────────────────
+
+    /// Claim accrued farm rewards, swap them to LP through `router` along
+    /// `path`, and re-stake the proceeds — atomically. `min_lp_out` is the
+    /// caller's slippage floor, enforced against the vault's measured LP
+    /// balance delta rather than anything the router reports.
+    ///
+    /// The reentrancy guard here is the *only* one on this path: it must hold
+    /// across the untrusted `router` call, and the `lp_farming` helpers this
+    /// delegates to take no guard of their own.
+    pub fn harvest_and_compound(
+        env: Env,
+        user: Address,
+        router: Address,
+        path: Vec<Address>,
+        min_lp_out: i128,
+    ) -> Result<vaults::harvest_compound::HarvestCompoundResult, ContractError> {
+        let _guard = security::reentrancy::ReentrancyGuard::new(&env)?;
+        vaults::harvest_compound::harvest_and_compound(&env, user, router, path, min_lp_out)
+    }
+
     // ── On-chain limit order book (Issue #701) ───────────────────────────────
 
     pub fn place_limit_order(
@@ -1738,6 +1773,10 @@ impl TimeLockedUpgradeContract {
 
     pub fn bridge_escrow_config(env: Env) -> Option<bridge::escrow::BridgeEscrowConfig> {
         bridge::escrow::get_config(&env)
+    }
+
+    pub fn reclaim_expired(env: Env, id: u64, sender: Address) -> Result<(), ContractError> {
+        bridge::escrow::reclaim_expired(&env, id, sender)
     }
 
     // --- Private remittance commitment tree ---

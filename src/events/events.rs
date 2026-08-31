@@ -104,6 +104,9 @@ pub const EV_COORD_REMOVED: Symbol = symbol_short!("coord_rem");
 /// Admin: admin ownership was transferred.
 pub const EV_ADMIN_TRANSFER: Symbol = symbol_short!("adm_xfer");
 
+/// Admin: multi-sig admin keys rotated.
+pub const EV_ADMIN_KEYS_ROTATED: Symbol = symbol_short!("rot_admin");
+
 /// Admin: emergency revocation vote was cast.
 pub const EV_REVOCATION_VOTE: Symbol = symbol_short!("revk_vote");
 
