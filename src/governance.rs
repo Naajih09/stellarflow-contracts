@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Map, Symbol, Vec};
+use soroban_sdk::{contracttype, symbol_short, Address, Bytes, BytesN, Env, Map, Symbol, Vec};
 use crate::{ContractData, ContractError, DATA_KEY, SIGNERS_KEY};
 
 const BALLOT_TTL_LEDGERS: u32 = 17_280;
@@ -350,6 +350,7 @@ pub struct VotingBallot {
     pub replacement: Address,
     pub proposer: Address,
     pub proposed_at: u64,
+    pub ipfs_cid: Bytes,
     pub votes: Map<Address, ()>,
 }
 
@@ -359,20 +360,26 @@ pub fn open_ballot(
     target: Address,
     replacement: Address,
     proposer: Address,
+    ipfs_cid: Bytes,
 ) -> Result<(), ContractError> {
-    let key = BallotKey::Proposal(proposal_id);
+    let key = BallotKey::Proposal(proposal_id.clone());
     if env.storage().temporary().has(&key) {
         return Err(ContractError::ProposalAlreadyActive);
     }
     let ballot = VotingBallot {
         target,
         replacement,
-        proposer,
+        proposer: proposer.clone(),
         proposed_at: env.ledger().timestamp(),
+        ipfs_cid: ipfs_cid.clone(),
         votes: Map::new(env),
     };
     env.storage().temporary().set(&key, &ballot);
     env.storage().temporary().extend_ttl(&key, BALLOT_TTL_THRESHOLD, BALLOT_TTL_LEDGERS);
+    env.events().publish(
+        (Symbol::new(env, "ProposalCreated"), proposal_id),
+        (proposer, ipfs_cid),
+    );
     crate::instance::bump_instance_ttl(env);
     Ok(())
 }
