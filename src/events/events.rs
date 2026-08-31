@@ -146,6 +146,9 @@ pub const EV_BALLOT_CLOSED: Symbol = symbol_short!("ball_clos");
 /// Governance: a proposal was vetoed by the Security Council.
 pub const EV_PROPOSAL_VETOED: Symbol = symbol_short!("prop_vet");
 
+/// Governance: a new governance proposal was created.
+pub const EV_PROPOSAL_CREATED: Symbol = symbol_short!("prop_new");
+
 // ---------------------------------------------------------------------------
 // Core publishing function
 // ---------------------------------------------------------------------------
@@ -320,6 +323,52 @@ pub fn emit_proposal_vetoed(
         EV_PROPOSAL_VETOED,
         proposal_id_sym,
         symbol_short!("vetoed"),
+        event,
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Governance Proposal Created Event
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone)]
+pub struct ProposalCreatedEvent {
+    pub proposal_id: u64,
+    pub creator: soroban_sdk::Address,
+    pub ipfs_cid: soroban_sdk::Bytes,
+    pub created_at: u64,
+}
+
+/// Emit a ProposalCreated event when a new governance proposal is created.
+///
+/// # Arguments
+/// * `env` - The contract environment
+/// * `proposal_id` - ID of the newly created proposal
+/// * `creator` - Address of the proposal creator
+/// * `ipfs_cid` - IPFS content hash (CID) of the full proposal documentation
+/// * `created_at` - Ledger timestamp of creation
+pub fn emit_proposal_created(
+    env: &Env,
+    proposal_id: u64,
+    creator: soroban_sdk::Address,
+    ipfs_cid: soroban_sdk::Bytes,
+    created_at: u64,
+) -> Result<(), ContractError> {
+    let proposal_id_sym = soroban_sdk::Symbol::new(env, &format!("prop_{}", proposal_id));
+    
+    let event = ProposalCreatedEvent {
+        proposal_id,
+        creator,
+        ipfs_cid,
+        created_at,
+    };
+    
+    emit_simple3(
+        env,
+        EV_PROPOSAL_CREATED,
+        symbol_short!("proposal"),
+        proposal_id_sym,
         event,
     )
 }
