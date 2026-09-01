@@ -251,7 +251,28 @@ pub fn execute_route(env: &Env, route: &Route) -> Result<RouteResult, ContractEr
         env.storage().temporary().set(&route_key, &state);
     }
 
-    // ── Phase 4: Finalize — clean up snapshot ───────────────────────────
+    // ── Phase 4: Finalize — enforce final minimum output & clean up ─────
+    let state: RouteComputationState = env
+        .storage()
+        .temporary()
+        .get(&route_key)
+        .ok_or(ContractError::RouteExecutionFailed)?;
+
+    // Strict minimum-output guard: validate the final settlement balance
+    // against the user-defined minimum for the terminal hop before the
+    // transaction is allowed to complete. If the aggregate output falls
+    // short, revert with `SlippageExceeded`. Because we return an `Err`,
+    // Soroban's transaction atomicity rolls back *all* intermediate pool
+    // swaps and storage writes (including the snapshot) automatically.
+    let final_step = route
+        .steps
+        .get(route.steps.len() - 1)
+        .ok_or(ContractError::RouteExecutionFailed)?;
+    if state.running_amount < final_step.min_amount_out {
+        env.storage().temporary().remove(&route_key);
+        return Err(ContractError::SlippageExceeded);
+    }
+
     env.storage().temporary().remove(&route_key);
 
     // Emit a settlement event for off-chain indexers.
