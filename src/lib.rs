@@ -101,6 +101,7 @@ pub mod storage;
 pub mod temp_governance;
 pub mod upgrades;
 pub mod validation;
+pub mod zk;
 pub use state_verification::{
     assert_contract_state_sanity, verify_contract_state, verify_storage_ttl_bumps,
     verify_zero_loss_accounting,
@@ -2239,6 +2240,80 @@ impl TimeLockedUpgradeContract {
         admin::prune::prune_expired_keys(&env, &admin, &targets)
     }
 }
+
+    // ── Groth16 ZK Proof Verification (Issue #725) ────────────────────────
+
+    /// Register a Groth16 verification key for a circuit on-chain.
+    pub fn register_zk_verification_key(
+        env: Env,
+        caller: Address,
+        vkey: zk::verifier::VerificationKey,
+    ) -> Result<(), ContractError> {
+        let data = Self::_load_data(&env)?;
+        if data.admin != caller {
+            return Err(ContractError::NotAdmin);
+        }
+        caller.require_auth();
+        zk::verifier::register_verification_key(&env, &vkey)
+    }
+
+    /// Retrieve a registered Groth16 verification key by circuit ID.
+    pub fn get_zk_verification_key(
+        env: Env,
+        circuit_id: BytesN<32>,
+    ) -> Option<zk::verifier::VerificationKey> {
+        zk::verifier::get_verification_key(&env, &circuit_id)
+    }
+
+    /// Remove a Groth16 verification key from storage.
+    pub fn remove_zk_verification_key(
+        env: Env,
+        caller: Address,
+        circuit_id: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        let data = Self::_load_data(&env)?;
+        if data.admin != caller {
+            return Err(ContractError::NotAdmin);
+        }
+        caller.require_auth();
+        zk::verifier::remove_verification_key(&env, &circuit_id)
+    }
+
+    /// Verify a Groth16 proof against the registered verification key.
+    pub fn verify_zk_proof(
+        env: Env,
+        proof: zk::verifier::Groth16Proof,
+        vkey: zk::verifier::VerificationKey,
+        public_inputs: Vec<BytesN<32>>,
+    ) -> Result<zk::verifier::VerificationResult, ContractError> {
+        zk::verifier::verify_proof(&env, &proof, &vkey, &public_inputs)
+    }
+
+    /// Verify a Groth16 proof with an off-chain pairing commitment.
+    pub fn verify_zk_proof_with_commitment(
+        env: Env,
+        proof: zk::verifier::Groth16Proof,
+        vkey: zk::verifier::VerificationKey,
+        public_inputs: Vec<BytesN<32>>,
+        pairing_commitment: zk::verifier::PairingCommitment,
+    ) -> Result<zk::verifier::VerificationResult, ContractError> {
+        zk::verifier::verify_proof_with_commitment(
+            &env, &proof, &vkey, &public_inputs, &pairing_commitment,
+        )
+    }
+
+    /// Batch-verify multiple Groth16 proofs in a single transaction.
+    pub fn batch_verify_zk_proofs(
+        env: Env,
+        proofs: Vec<(
+            zk::verifier::Groth16Proof,
+            zk::verifier::VerificationKey,
+            Vec<BytesN<32>>,
+        )>,
+    ) -> Result<Vec<zk::verifier::VerificationResult>, ContractError> {
+        zk::verifier::batch_verify_proofs(&env, &proofs)
+    }
+
 #[cfg(test)]
 mod query_guardrail_tests {
     use super::*;
