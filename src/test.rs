@@ -1302,3 +1302,269 @@ fn test_zk_merkle_deposit_and_withdrawal_flow() {
     assert_eq!(verify_res, true);
 }
 
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Flash Loan Arbitrage Detection Tests (issue #757)
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod flash_loan_guard_tests {
+    use crate::flash_loan_guard::{
+        check_flash_loan_arbitrage, check_k_nondecreasing, check_liquidity_depth,
+        check_reserve_ratio, PoolSnapshot, MIN_LIQUIDITY_DEPTH, MAX_RATIO_DEVIATION_BPS,
+    };
+    use crate::ContractError;
+
+    const DEPTH: u128 = MIN_LIQUIDITY_DEPTH;
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    fn pool(reserve_a: u128, reserve_b: u128) -> PoolSnapshot {
+        PoolSnapshot { reserve_a, reserve_b }
+    }
+
+    // ── 1. Liquidity depth safety threshold ───────────────────────────────────
+
+    #[test]
+    fn test_flash_loan_guard_liquidity_depth_passes_at_minimum() {
+        // Both reserves exactly at the minimum threshold should be accepted.
+        let snap = pool(DEPTH, DEPTH);
+        assert!(check_liquidity_depth(&snap).is_ok());
+    }
+
+    #[test]
+    fn test_flash_loan_guard_liquidity_depth_passes_above_minimum() {
+        let snap = pool(DEPTH * 5, DEPTH * 3);
+        assert!(check_liquidity_depth(&snap).is_ok());
+    }
+
+    #[test]
+    fn test_flash_loan_guard_liquidity_depth_fails_reserve_a_drained() {
+        // reserve_a drained to one stroop below minimum.
+        let snap = pool(DEPTH - 1, DEPTH * 10);
+        assert_eq!(
+            check_liquidity_depth(&snap),
+            Err(ContractError::FlashLoanArbitrageDetected)
+        );
+    }
+
+    #[test]
+    fn test_flash_loan_guard_liquidity_depth_fails_reserve_b_drained() {
+        let snap = pool(DEPTH * 10, DEPTH - 1);
+        assert_eq!(
+            check_liquidity_depth(&snap),
+            Err(ContractError::FlashLoanArbitrageDetected)
+        );
+    }
+
+    #[test]
+    fn test_flash_loan_guard_liquidity_depth_fails_both_reserves_drained() {
+        let snap = pool(0, 0);
+        assert_eq!(
+            check_liquidity_depth(&snap),
+            Err(ContractError::FlashLoanArbitrageDetected)
+        );
+    }
+
+    // ── 2. Pool invariant non-decrease (k >= k_before) ────────────────────────
+
+    #[test]
+    fn test_flash_loan_guard_k_nondecreasing_passes_when_k_unchanged() {
+        let before = pool(2_000, 5_000);
+        let after = pool(2_000, 5_000);
+        assert!(check_k_nondecreasing(&before, &after).is_ok());
+    }
+
+    #[test]
+    fn test_flash_loan_guard_k_nondecreasing_passes_when_k_increases() {
+        // Fee accrual: slightly less out than in → k grows.
+        let before = pool(10_000, 10_000);
+        let after = pool(10_100, 9_910); // k_after = 100_101_000 > k_before = 100_000_000
+        assert!(check_k_nondecreasing(&before, &after).is_ok());
+    }
+
+    #[test]
+    fn test_flash_loan_guard_k_nondecreasing_fails_when_k_decreases() {
+        let before = pool(10_000, 10_000);
+        let after = pool(9_000, 9_000); // k_after = 81_000_000 < k_before = 100_000_000
+        assert_eq!(
+            check_k_nondecreasing(&before, &after),
+            Err(ContractError::FlashLoanArbitrageDetected)
+        );
+    }
+
+    #[test]
+    fn test_flash_loan_guard_k_nondecreasing_fails_small_drain() {
+        // Even a 1-stroop loss should be caught.
+        let r = DEPTH;
+        let before = pool(r, r);
+        let after = pool(r - 1, r - 1);
+        assert_eq!(
+            check_k_nondecreasing(&before, &after),
+            Err(ContractError::FlashLoanArbitrageDetected)
+        );
+    }
+
+    #[test]
+    fn test_flash_loan_guard_k_nondecreasing_passes_on_large_reserves() {
+        // Realistic large pool: 10^15 XLM each side.
+        let r: u128 = 1_000_000_000_000_000_000_000;
+        // After a tiny 0.01% fee-bearing swap: k grows.
+        let amount_in = r / 10_000;
+        let amount_out = amount_in - 1; // floor truncation keeps k non-decreasing
+        let before = pool(r, r);
+        let after = pool(r + amount_in, r - amount_out);
+        assert!(check_k_nondecreasing(&before, &after).is_ok());
+    }
+
+    // ── 3. Reserve ratio deviation bound ─────────────────────────────────────
+
+    #[test]
+    fn test_flash_loan_guard_ratio_passes_when_unchanged() {
+        let snap = pool(DEPTH * 3, DEPTH);
+        assert!(check_reserve_ratio(&snap, &snap).is_ok());
+    }
+
+    #[test]
+    fn test_flash_loan_guard_ratio_passes_on_small_shift() {
+        // 5% price movement — well within the 50% tolerance window.
+        let before = pool(100 * DEPTH, 100 * DEPTH);
+        let after = pool(105 * DEPTH, 100 * DEPTH);
+        assert!(check_reserve_ratio(&before, &after).is_ok());
+    }
+
+    #[test]
+    fn test_flash_loan_guard_ratio_passes_at_exact_boundary() {
+        // Exactly MAX_RATIO_DEVIATION_BPS = 50% shift is allowed (boundary inclusive).
+        let before = pool(DEPTH * 2, DEPTH * 2);
+        // 50% upward: ratio goes from 1 to 1.5
+        let after = pool(DEPTH * 3, DEPTH * 2);
+        assert!(check_reserve_ratio(&before, &after).is_ok());
+    }
+
+    #[test]
+    fn test_flash_loan_guard_ratio_fails_flash_loan_spike() {
+        // Flash loan scenario: reserve_a doubles via borrowed capital.
+        let before = pool(DEPTH, DEPTH);
+        let after = pool(DEPTH * 2 + 1, DEPTH); // 100%+ ratio shift
+        assert_eq!(
+            check_reserve_ratio(&before, &after),
+            Err(ContractError::FlashLoanArbitrageDetected)
+        );
+    }
+
+    #[test]
+    fn test_flash_loan_guard_ratio_fails_reserve_collapse() {
+        // Attacker drains reserve_b in the same transaction.
+        let before = pool(DEPTH * 10, DEPTH * 10);
+        // reserve_b collapses to near minimum while reserve_a is untouched.
+        // ratio_before = 1.0; ratio_after = 10 → 900% deviation.
+        let after = pool(DEPTH * 10, DEPTH);
+        assert_eq!(
+            check_reserve_ratio(&before, &after),
+            Err(ContractError::FlashLoanArbitrageDetected)
+        );
+    }
+
+    // ── 4. Combined check_flash_loan_arbitrage ────────────────────────────────
+
+    #[test]
+    fn test_flash_loan_arbitrage_passes_for_normal_swap() {
+        // Standard 1% swap on a well-funded pool.
+        let r = 10_000 * DEPTH;
+        let amount_in = r / 100;
+        let amount_out = (r * amount_in) / (r + amount_in); // constant-product
+        let before = pool(r, r);
+        let after = pool(r + amount_in, r - amount_out);
+        assert!(check_flash_loan_arbitrage(&before, &after).is_ok());
+    }
+
+    #[test]
+    fn test_flash_loan_arbitrage_rejects_zero_reserve_before() {
+        let before = PoolSnapshot { reserve_a: 0, reserve_b: DEPTH };
+        let after = pool(DEPTH, DEPTH);
+        assert_eq!(
+            check_flash_loan_arbitrage(&before, &after),
+            Err(ContractError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn test_flash_loan_arbitrage_rejects_zero_reserve_after() {
+        let before = pool(DEPTH, DEPTH);
+        let after = PoolSnapshot { reserve_a: DEPTH, reserve_b: 0 };
+        assert_eq!(
+            check_flash_loan_arbitrage(&before, &after),
+            Err(ContractError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn test_flash_loan_arbitrage_rejects_complete_reserve_drain() {
+        // Attacker uses flash loan to drain both reserves completely.
+        let before = pool(100 * DEPTH, 100 * DEPTH);
+        let after = PoolSnapshot { reserve_a: 1, reserve_b: 1 };
+        assert_eq!(
+            check_flash_loan_arbitrage(&before, &after),
+            Err(ContractError::FlashLoanArbitrageDetected)
+        );
+    }
+
+    #[test]
+    fn test_flash_loan_arbitrage_rejects_single_sided_drain() {
+        // reserve_b collapses below min depth while reserve_a is inflated.
+        let before = pool(50 * DEPTH, 50 * DEPTH);
+        let after = pool(100 * DEPTH, DEPTH / 2); // depth check catches reserve_b
+        assert_eq!(
+            check_flash_loan_arbitrage(&before, &after),
+            Err(ContractError::FlashLoanArbitrageDetected)
+        );
+    }
+
+    #[test]
+    fn test_flash_loan_arbitrage_rejects_k_decrease_on_deep_pool() {
+        // Pool is deep enough (both above min), ratio is fine, but k drops.
+        let r = 10 * DEPTH;
+        let before = pool(r, r);
+        let after = pool(r - 1, r - 1); // tiny k decrease
+        assert_eq!(
+            check_flash_loan_arbitrage(&before, &after),
+            Err(ContractError::FlashLoanArbitrageDetected)
+        );
+    }
+
+    #[test]
+    fn test_flash_loan_arbitrage_rejects_price_manipulation_attack() {
+        // Classic flash-loan sandwich: borrow huge, swap all A→B,
+        // victim's trade executes at terrible price, attacker reverses.
+        // We only see the attacker's first swap here.
+        // Pool: 100k A, 100k B. Attacker borrows 200k A and dumps it.
+        let r = 100_000 * DEPTH;
+        let borrowed = 200_000 * DEPTH;
+        // After dump: reserve_a = 300k, reserve_b = 33.33k
+        let new_b = (r * r) / (r + borrowed); // ~33333 * DEPTH
+        let before = pool(r, r);
+        let after = pool(r + borrowed, new_b);
+        assert_eq!(
+            check_flash_loan_arbitrage(&before, &after),
+            Err(ContractError::FlashLoanArbitrageDetected)
+        );
+    }
+
+    #[test]
+    fn test_flash_loan_arbitrage_constant_product_large_swap_within_bounds() {
+        // Legitimate large (10%) fee-bearing swap where k strictly grows.
+        let r = 1_000_000 * DEPTH;
+        let amount_in = r / 10;
+        // Exact constant product: amount_out = r * amount_in / (r + amount_in).
+        // Using integer floor: amount_out < amount_in so k grows.
+        let amount_out = r
+            .checked_mul(amount_in)
+            .unwrap()
+            .checked_div(r + amount_in)
+            .unwrap();
+        let before = pool(r, r);
+        let after = pool(r + amount_in, r - amount_out);
+        assert!(check_flash_loan_arbitrage(&before, &after).is_ok());
+    }
+}
