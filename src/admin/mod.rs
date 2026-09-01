@@ -1,4 +1,49 @@
-pub mod cleanup;
+pub mod cleanup {
+    use super::*;
+
+    pub fn cleanup_expired_proposals(env: &Env) -> Result<u32, ContractError> {
+        super::prune::prune_expired_keys(env, super::prune::PruneTarget::EmergencyRevocation)
+    }
+
+    pub fn reclaim_expired_proposal_deposit(env: &Env, maker: &Address) -> Result<u32, ContractError> {
+        maker.require_auth();
+        cleanup_expired_proposals(env)
+    }
+}
+
+pub mod prune {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum PruneTarget {
+        EmergencyRevocation,
+    }
+
+    pub fn prune_expired_keys(env: &Env, target: PruneTarget) -> Result<u32, ContractError> {
+        let mut pruned = 0u32;
+        match target {
+            PruneTarget::EmergencyRevocation => {
+                if let Some(proposal) = get_temp_proposal::<EmergencyRevocationProposal>(
+                    env,
+                    &EMERGENCY_REVOCATION_TEMP_KEY,
+                ) {
+                    if proposal_state(env, proposal.proposed_at) == ProposalState::Expired {
+                        remove_temp_proposal(env, &EMERGENCY_REVOCATION_TEMP_KEY);
+                        pruned += 1;
+                    }
+                }
+            }
+        }
+        Ok(pruned)
+    }
+}
+
+pub use action_queue::{
+    cancel_action, execute_action, get_action_timelock_remaining, get_queued_action,
+    queue_admin_action, DynamicFeeConfigParams, FeeCeilingUpdateParams, QueuedActionPayload,
+    QueuedAdminAction, ADMIN_ACTION_DELAY_SECONDS,
+};
+pub use prune::{prune_expired_keys, PruneTarget};
 
 use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, TryFromVal, Val, Vec};
 use crate::{ContractData, ContractError, DATA_KEY, SIGNERS_KEY, REVOKED_SIGNER_KEY};
@@ -13,6 +58,8 @@ pub(crate) const PENDING_ADMIN_KEY: Symbol = symbol_short!("PADMIN");
 pub(crate) const PAUSED_KEY: Symbol = symbol_short!("PAUSED");
 
 const ADMIN_CHANGE_TIMELOCK_SECONDS: u64 = 24 * 60 * 60;
+
+const PROPOSAL_EXPIRY_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 // ── Per-action admin nonce map ────────────────────────────────────────────────
 
@@ -130,6 +177,23 @@ pub struct AdminChangeProposal {
     pub proposed_at: u64,
 }
 
+/// Lifecycle state for a multi-sig proposal approval window.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProposalState {
+    Active,
+    Expired,
+}
+
+/// Returns whether the proposal is still inside the 7-day approval window.
+pub fn proposal_state(env: &Env, proposed_at: u64) -> ProposalState {
+    if env.ledger().timestamp().saturating_sub(proposed_at) >= PROPOSAL_EXPIRY_SECONDS {
+        ProposalState::Expired
+    } else {
+        ProposalState::Active
+    }
+}
+
 fn execute_emergency_revocation(
     env: &Env,
     data: ContractData,
@@ -190,8 +254,9 @@ pub fn propose_emergency_revocation(
     consume_admin_nonce(env, &proposer, AdminAction::ProposeEmergencyRevocation, nonce)?;
 
     // Guard: only one active emergency proposal at a time.
+    prune::prune_expired_keys(env, prune::PruneTarget::EmergencyRevocation)?;
     if has_temp_proposal(env, &EMERGENCY_REVOCATION_TEMP_KEY) {
-        return Err(ContractError::EmergencyRevocAlreadyActive);
+        return Err(ContractError::EmergencyRevocationAlreadyActive);
     }
 
     // The target must currently be a signer or the admin.
@@ -264,6 +329,11 @@ pub fn vote_emergency_revocation(
     let mut proposal: EmergencyRevocationProposal = get_temp_proposal(env, &EMERGENCY_REVOCATION_TEMP_KEY)
         .ok_or(ContractError::NoActiveEmergencyRevocation)?;
 
+    if proposal_state(env, proposal.proposed_at) == ProposalState::Expired {
+        remove_temp_proposal(env, &EMERGENCY_REVOCATION_TEMP_KEY);
+        return Err(ContractError::NoActiveEmergencyRevocation);
+    }
+
     // Prevent double-voting.
     for i in 0..proposal.votes.len() {
         if proposal.votes.get(i).unwrap() == voter {
@@ -295,7 +365,12 @@ pub fn vote_emergency_revocation(
 /// Returns the active emergency revocation proposal, if one exists.
 /// Proposals are stored in temporary storage and will auto-purge after TTL.
 pub fn get_emergency_revocation_proposal(env: &Env) -> Option<EmergencyRevocationProposal> {
-    get_temp_proposal(env, &EMERGENCY_REVOCATION_TEMP_KEY)
+    let proposal = get_temp_proposal(env, &EMERGENCY_REVOCATION_TEMP_KEY)?;
+    if proposal_state(env, proposal.proposed_at) == ProposalState::Expired {
+        None
+    } else {
+        Some(proposal)
+    }
 }
 
 /// Returns `true` if `addr` has been stamped as revoked.
@@ -350,7 +425,10 @@ pub fn purge_emergency_revocation_proposal(env: &Env) -> Result<(), ContractErro
 /// Returns true only if the proposal exists in temporary storage and hasn't expired
 /// according to Soroban's TTL mechanism.
 pub fn has_active_emergency_revocation(env: &Env) -> bool {
-    has_temp_proposal(env, &EMERGENCY_REVOCATION_TEMP_KEY)
+    match get_temp_proposal::<EmergencyRevocationProposal>(env, &EMERGENCY_REVOCATION_TEMP_KEY) {
+        Some(proposal) => proposal_state(env, proposal.proposed_at) == ProposalState::Active,
+        None => false,
+    }
 }
 
 // ─── Issue #429: Two-phase ownership transfer ────────────────────────────────
@@ -492,7 +570,7 @@ pub fn countersign_admin_change(
     contract_data.admin = proposal.new_admin;
     env.storage().instance().set(&DATA_KEY, &contract_data);
     env.storage().instance().remove(&PENDING_ADMIN_KEY);
-    crate::kernel::instance::bump_instance_ttl(env);
+    crate::instance::bump_instance_ttl(env);
     Ok(())
 }
 
@@ -510,7 +588,7 @@ pub fn execute_admin_change_by_timelock(
 
     let elapsed = env.ledger().timestamp().saturating_sub(proposal.proposed_at);
     if elapsed < ADMIN_CHANGE_TIMELOCK_SECONDS {
-        return Err(ContractError::AdminChangeTimelockNotSatis);
+        return Err(ContractError::AdminTimelockNotSatisfied);
     }
 
     let data: ContractData = env

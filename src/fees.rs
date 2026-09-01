@@ -4,11 +4,20 @@
 //! `INTERIOR_SCALE` (10^14) before division, then normalize back to the
 //! standard 10^7 fixed-point footprint prior to ledger mutations.
 
-use crate::{AssetId, ContractError, TimeLockedUpgradeContract};
+use crate::{AssetId, ContractData, ContractError, TimeLockedUpgradeContract, DATA_KEY};
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
 pub const STANDARD_FIXED_POINT_SCALE: i128 = 10_000_000;
 pub const INTERIOR_FEE_PRECISION_SCALE: i128 = 100_000_000_000_000;
+
+/// Supported pool fee tiers in basis points: 0.05%, 0.30%, and 1.00%.
+pub const FEE_TIER_5_BPS: u32 = 5;
+pub const FEE_TIER_30_BPS: u32 = 30;
+pub const FEE_TIER_100_BPS: u32 = 100;
+
+/// Collected fee split: 80% to LP token holders, 20% to protocol treasury.
+pub const LP_FEE_SHARE_BPS: u64 = 8_000;
+pub const TREASURY_FEE_SHARE_BPS: u64 = 2_000;
 
 // ---------------------------------------------------------------------------
 // Asset pricing storage (general — unchanged)
@@ -33,6 +42,28 @@ pub enum FeesStorageKey {
     CorridorPool(AssetId),
     VolumeHistory(AssetId),
     DynamicFee(AssetId),
+    FlashLoanPool(AssetId),
+}
+
+/// Separate fee tracking pool for flash loan revenue.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlashLoanFeePool {
+    pub asset: AssetId,
+    pub accumulated_fees: u64,
+    pub total_lp_distributed: u64,
+    pub total_treasury_distributed: u64,
+}
+
+impl FlashLoanFeePool {
+    pub fn new(asset: AssetId) -> Self {
+        Self {
+            asset,
+            accumulated_fees: 0,
+            total_lp_distributed: 0,
+            total_treasury_distributed: 0,
+        }
+    }
 }
 
 /// Historical volume tracking to calculate volume delta
@@ -59,20 +90,29 @@ impl VolumeHistory {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DynamicFeeState {
     pub min_fee_bps: u32,  // 5 = 0.05%
-    pub max_fee_bps: u32,  // 30 = 0.30%
+    pub max_fee_bps: u32,  // 100 = 1.00%
     pub current_fee_bps: u32,
     pub period_seconds: u64, // how often to recalculate (default: 3600 = 1 hour)
 }
 
 impl DynamicFeeState {
+    pub fn new_default() -> Self {
+        Self::new()
+    }
+
     fn new() -> Self {
         Self {
             min_fee_bps: 5,    // 0.05%
-            max_fee_bps: 30,   // 0.30%
+            max_fee_bps: FEE_TIER_100_BPS, // 1.00%
             current_fee_bps: 5, // start at minimum
             period_seconds: 3600, // 1 hour recalculation period
         }
     }
+}
+
+/// Returns true if `fee_bps` is one of the supported pool fee tiers.
+pub fn is_valid_fee_tier(fee_bps: u32) -> bool {
+    fee_bps == FEE_TIER_5_BPS || fee_bps == FEE_TIER_30_BPS || fee_bps == FEE_TIER_100_BPS
 }
 
 impl CorridorFeePool {
@@ -218,7 +258,11 @@ pub fn add_corridor_fees(
     admin.require_auth();
     // Reject dust deposits that fall below the minimum transfer threshold.
     crate::validation::dust::check_min_transfer(collected)?;
-    let data = TimeLockedUpgradeContract::load_data(&env)?;
+    let data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .ok_or(ContractError::NotInitialized)?;
     if data.admin != admin {
         return Err(ContractError::NotAdmin);
     }
@@ -246,6 +290,19 @@ pub fn get_corridor_fee_pool(env: Env, asset: AssetId) -> CorridorFeePool {
         .instance()
         .get(&key)
         .unwrap_or(CorridorFeePool::new(asset))
+}
+
+/// Split collected swap fees between LP token holders (80%) and the protocol
+/// treasury vault (20%).
+pub fn split_collected_fees(collected: u64) -> Result<(u64, u64), ContractError> {
+    let lp_share = u64::try_from(
+        (u128::from(collected) * u128::from(LP_FEE_SHARE_BPS)) / 10_000,
+    )
+    .map_err(|_| ContractError::Overflow)?;
+    let treasury_share = collected
+        .checked_sub(lp_share)
+        .ok_or(ContractError::MathOverflow)?;
+    Ok((lp_share, treasury_share))
 }
 
 /// Update volume history and recalculate dynamic fee if period has elapsed
@@ -299,21 +356,25 @@ fn calculate_dynamic_fee(volume_history: &VolumeHistory, dynamic_fee: &DynamicFe
     // Calculate volume change ratio (current / previous)
     let volume_delta = volume_history.current_period_volume as f64 / volume_history.previous_period_volume as f64;
     
-    // Adjust fee based on volume changes:
-    // - Volume spiked > 50%: increase fee to reduce congestion
-    // - Volume dropped > 30%: decrease fee to attract more trading
+    // Adjust fee by moving one supported fee tier up or down based on volume.
     let new_fee_bps = if volume_delta > 1.5 {
-        // Volume increased significantly - raise fee
-        dynamic_fee.current_fee_bps.saturating_add(5)
+        match dynamic_fee.current_fee_bps {
+            FEE_TIER_5_BPS => FEE_TIER_30_BPS,
+            FEE_TIER_30_BPS => FEE_TIER_100_BPS,
+            _ => dynamic_fee.current_fee_bps,
+        }
     } else if volume_delta < 0.7 {
-        // Volume decreased significantly - lower fee
-        dynamic_fee.current_fee_bps.saturating_sub(5)
+        match dynamic_fee.current_fee_bps {
+            FEE_TIER_100_BPS => FEE_TIER_30_BPS,
+            FEE_TIER_30_BPS => FEE_TIER_5_BPS,
+            _ => dynamic_fee.current_fee_bps,
+        }
     } else {
         // No significant change - keep current fee
         dynamic_fee.current_fee_bps
     };
-    
-    // Clamp fee to within allowed range [0.05%, 0.30%] = [5bps, 30bps]
+
+    // Clamp fee to the configured safety bounds [min_fee_bps, max_fee_bps].
     Ok(new_fee_bps.clamp(dynamic_fee.min_fee_bps, dynamic_fee.max_fee_bps))
 }
 
@@ -325,6 +386,26 @@ pub fn get_current_dynamic_fee(env: &Env, asset: AssetId) -> u32 {
         .get(&fee_key)
         .unwrap_or(DynamicFeeState::new());
     dynamic_fee.current_fee_bps
+}
+
+/// Resolve the swap fee to apply for a pool (Issue #766).
+///
+/// If the pool has opted into adaptive (volatility-based) fee scaling, returns
+/// the volatility-scaled fee that lies within the configured `[base, max]`
+/// band. Otherwise falls back to the provided legacy fee unchanged, so pools
+/// that never configured an [`AdaptiveFeeConfig`] keep their existing
+/// volume-based dynamic fee behavior.
+pub fn resolve_swap_fee_bps(
+    env: &Env,
+    pool: AssetId,
+    legacy_fee_bps: u32,
+) -> Result<u32, ContractError> {
+    if crate::config::get_adaptive_fee_config(env, pool).is_some() {
+        let (fee, _vol) = crate::amm::adaptive_fee::resolve_adaptive_fee(env, pool)?;
+        Ok(fee)
+    } else {
+        Ok(legacy_fee_bps)
+    }
 }
 
 /// Calculate and deduct dynamic fee from a trade amount
@@ -353,13 +434,20 @@ pub fn set_dynamic_fee_config(
     period_seconds: u64,
 ) -> Result<(), ContractError> {
     caller.require_auth();
-    let data = TimeLockedUpgradeContract::load_data(env)?;
+    let data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .ok_or(ContractError::NotInitialized)?;
     if data.admin != *caller {
         return Err(ContractError::NotAdmin);
     }
     
     // Validate bounds
-    if min_fee_bps < 5 || max_fee_bps > 30 || min_fee_bps >= max_fee_bps {
+    if !is_valid_fee_tier(min_fee_bps)
+        || !is_valid_fee_tier(max_fee_bps)
+        || min_fee_bps >= max_fee_bps
+    {
         return Err(ContractError::InvalidVarianceConfig);
     }
     if period_seconds < 300 { // Minimum 5 minutes to prevent excessive recalculations
@@ -381,6 +469,47 @@ pub fn set_dynamic_fee_config(
     Ok(())
 }
 
+/// Adjust the current fee tier via governance.
+///
+/// This is the governance vote entry point. The caller must be the protocol
+/// admin/governance address and the selected tier must be one of the supported
+/// tiers and within the configured safety bounds.
+pub fn governance_adjust_fee_tier(
+    env: &Env,
+    governance: &Address,
+    asset: AssetId,
+    new_fee_bps: u32,
+) -> Result<u32, ContractError> {
+    governance.require_auth();
+    let data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .ok_or(ContractError::NotInitialized)?;
+    if data.admin != *governance {
+        return Err(ContractError::NotAdmin);
+    }
+    if !is_valid_fee_tier(new_fee_bps) {
+        return Err(ContractError::InvalidVarianceConfig);
+    }
+
+    let fee_key = FeesStorageKey::DynamicFee(asset);
+    let mut dynamic_fee: DynamicFeeState = env
+        .storage()
+        .instance()
+        .get(&fee_key)
+        .unwrap_or(DynamicFeeState::new());
+
+    if new_fee_bps < dynamic_fee.min_fee_bps || new_fee_bps > dynamic_fee.max_fee_bps {
+        return Err(ContractError::InvalidVarianceConfig);
+    }
+
+    dynamic_fee.current_fee_bps = new_fee_bps;
+    env.storage().instance().set(&fee_key, &dynamic_fee);
+
+    Ok(new_fee_bps)
+}
+
 // ---------------------------------------------------------------------------
 // Corridor weight profile functions — independent access control (issue #530)
 // ---------------------------------------------------------------------------
@@ -396,7 +525,11 @@ pub fn set_corridor_weight(
     dynamic_weight: u64,
 ) -> Result<CorridorWeightProfile, ContractError> {
     admin.require_auth();
-    let data = TimeLockedUpgradeContract::load_data(&env)?;
+    let data: ContractData = env
+        .storage()
+        .instance()
+        .get(&DATA_KEY)
+        .ok_or(ContractError::NotInitialized)?;
     if data.admin != admin {
         return Err(ContractError::NotAdmin);
     }
@@ -474,10 +607,134 @@ pub fn distribute_variable_fee_pool(
     Ok(profiles)
 }
 
+// ---------------------------------------------------------------------------
+// Flash Loan Fee Distribution Handlers (#764)
+// ---------------------------------------------------------------------------
+
+/// Record flash loan fee revenue for a given asset.
+pub fn record_flash_fee(env: &Env, asset: AssetId, amount: u64) -> Result<u64, ContractError> {
+    if amount == 0 {
+        return Ok(0);
+    }
+    let key = FeesStorageKey::FlashLoanPool(asset);
+    let mut pool: FlashLoanFeePool = env
+        .storage()
+        .instance()
+        .get(&key)
+        .unwrap_or_else(|| FlashLoanFeePool::new(asset));
+
+    pool.accumulated_fees = pool
+        .accumulated_fees
+        .checked_add(amount)
+        .ok_or(ContractError::Overflow)?;
+
+    env.storage().instance().set(&key, &pool);
+    Ok(pool.accumulated_fees)
+}
+
+/// Retrieve the current flash loan fee pool for an asset.
+pub fn get_flash_fee_pool(env: &Env, asset: AssetId) -> FlashLoanFeePool {
+    let key = FeesStorageKey::FlashLoanPool(asset);
+    env.storage()
+        .instance()
+        .get(&key)
+        .unwrap_or_else(|| FlashLoanFeePool::new(asset))
+}
+
+/// Set the LP reward pool destination address for flash fee distributions.
+pub fn set_lp_reward_pool(env: &Env, admin: &Address, lp_reward_pool: Address) -> Result<(), ContractError> {
+    admin.require_auth();
+    let data: crate::ContractData = env
+        .storage()
+        .instance()
+        .get(&crate::DATA_KEY)
+        .ok_or(ContractError::NotInitialized)?;
+    if data.admin != *admin {
+        return Err(ContractError::NotAdmin);
+    }
+    env.storage().instance().set(&crate::LP_REWARD_POOL_KEY, &lp_reward_pool);
+    Ok(())
+}
+
+/// Get the LP reward pool address (falls back to DAO treasury if not configured).
+pub fn get_lp_reward_pool(env: &Env) -> Result<Address, ContractError> {
+    if let Some(pool) = env.storage().instance().get::<_, Address>(&crate::LP_REWARD_POOL_KEY) {
+        Ok(pool)
+    } else {
+        env.storage()
+            .instance()
+            .get::<_, Address>(&crate::TREASURY_KEY)
+            .ok_or(ContractError::NotInitialized)
+    }
+}
+
+/// Distribute accumulated flash loan service fees: 50% to LP reward pool and 50% to DAO treasury.
+/// Emits `FlashLoanFeesDistributed` event with token breakdown.
+pub fn distribute_flash_fees(
+    env: &Env,
+    caller: &Address,
+    asset: AssetId,
+) -> Result<(u64, u64), ContractError> {
+    caller.require_auth();
+    let key = FeesStorageKey::FlashLoanPool(asset);
+    let mut pool: FlashLoanFeePool = env
+        .storage()
+        .instance()
+        .get(&key)
+        .unwrap_or_else(|| FlashLoanFeePool::new(asset));
+
+    if pool.accumulated_fees == 0 {
+        return Ok((0, 0));
+    }
+
+    let total = pool.accumulated_fees;
+    let lp_share = total / 2;
+    let treasury_share = total - lp_share;
+
+    let treasury: Address = env
+        .storage()
+        .instance()
+        .get(&crate::TREASURY_KEY)
+        .ok_or(ContractError::NotInitialized)?;
+
+    let lp_reward_pool: Address = env
+        .storage()
+        .instance()
+        .get::<_, Address>(&crate::LP_REWARD_POOL_KEY)
+        .unwrap_or_else(|| treasury.clone());
+
+    pool.accumulated_fees = 0;
+    pool.total_lp_distributed = pool
+        .total_lp_distributed
+        .checked_add(lp_share)
+        .ok_or(ContractError::Overflow)?;
+    pool.total_treasury_distributed = pool
+        .total_treasury_distributed
+        .checked_add(treasury_share)
+        .ok_or(ContractError::Overflow)?;
+
+    env.storage().instance().set(&key, &pool);
+
+    // Emit FlashLoanFeesDistributed event
+    crate::events::publish_flash_fees_distributed(
+        env,
+        crate::events::FlashLoanFeesDistributedEvent {
+            asset,
+            total_amount: total,
+            lp_share,
+            treasury_share,
+            lp_reward_pool: lp_reward_pool.clone(),
+            treasury: treasury.clone(),
+        },
+    );
+
+    Ok((lp_share, treasury_share))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TimeLockedUpgradeContractClient;
+    use crate::{TimeLockedUpgradeContract, TimeLockedUpgradeContractClient};
     use soroban_sdk::testutils::Address as _;
 
     fn setup() -> (Env, TimeLockedUpgradeContractClient<'static>, Address, Address) {
@@ -490,6 +747,33 @@ mod tests {
         let attacker = Address::generate(&env);
         client.initialize(&admin, &treasury);
         (env, client, admin, attacker)
+    }
+
+    #[test]
+    fn test_flash_loan_fee_accumulation_and_distribution() {
+        let (env, client, admin, _) = setup();
+        let asset: AssetId = 3897123275;
+        let lp_pool = Address::generate(&env);
+
+        // Set LP reward pool address
+        client.set_lp_reward_pool(&admin, &lp_pool);
+
+        // Record flash loan revenue
+        let acc = client.record_flash_fee(&asset, &1000u64);
+        assert_eq!(acc, 1000u64);
+
+        let pool_status = client.get_flash_fee_pool(&asset);
+        assert_eq!(pool_status.accumulated_fees, 1000u64);
+
+        // Distribute fees (50% to LP reward pool, 50% to DAO treasury)
+        let (lp_share, treasury_share) = client.distribute_flash_fees(&admin, &asset);
+        assert_eq!(lp_share, 500u64);
+        assert_eq!(treasury_share, 500u64);
+
+        let pool_after = client.get_flash_fee_pool(&asset);
+        assert_eq!(pool_after.accumulated_fees, 0u64);
+        assert_eq!(pool_after.total_lp_distributed, 500u64);
+        assert_eq!(pool_after.total_treasury_distributed, 500u64);
     }
 
     #[test]

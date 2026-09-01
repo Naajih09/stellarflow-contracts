@@ -597,6 +597,7 @@ pub trait StellarFlowTrait {
     /// Returns `Error::SlippageToleranceExceeded` if output is below acceptable minimum
     fn execute_swap_with_dynamic_slippage(
         env: Env,
+        sender: Address,
         from_asset: Symbol,
         to_asset: Symbol,
         amount_in: i128,
@@ -609,6 +610,7 @@ pub trait StellarFlowTrait {
     /// Bypasses dynamic slippage calculation and uses a fixed tolerance specified by the caller.
     ///
     /// # Arguments
+    /// * `sender` - Address initiating the swap
     /// * `from_asset` - Source asset symbol
     /// * `to_asset` - Destination asset symbol
     /// * `amount_in` - Amount to swap
@@ -618,6 +620,7 @@ pub trait StellarFlowTrait {
     /// Actual output amount if swap succeeds
     fn execute_swap_with_manual_slippage(
         env: Env,
+        sender: Address,
         from_asset: Symbol,
         to_asset: Symbol,
         amount_in: i128,
@@ -3653,6 +3656,16 @@ impl PriceOracle {
             .persistent()
             .has(&crate::auth::DataKey::VeflowLockContract)
         {
+            let lock_contract: Address = env
+                .storage()
+                .persistent()
+                .get(&crate::auth::DataKey::VeflowLockContract)
+                .unwrap();
+            let _: () = env.invoke_contract(
+                &lock_contract,
+                &Symbol::new(&env, "checkpoint_reclaim_on_vote"),
+                soroban_sdk::vec![&env, voter.clone().to_val()],
+            );
             return Self::record_vote(&env, &voter, action_id, true);
         }
 
@@ -3991,8 +4004,30 @@ impl PriceOracle {
             }
             AdminAction::Upgrade => {
                 // Parse wasm hash from data (expected as hex string)
-                // For simplicity, we'll skip the actual upgrade here
-                // In production, you'd parse the bytesN from the data string
+                use soroban_sdk::BytesN;
+                use hex::decode;
+                
+                let hex_str = proposed.data.to_string();
+                let decoded = decode(&hex_str).map_err(|_| ContractError::InvalidActionType)?;
+                if decoded.len() != 32 {
+                    return Err(ContractError::InvalidActionType);
+                }
+                
+                let new_wasm_hash: BytesN<32> = BytesN::from_array(&env, &decoded.try_into().unwrap());
+                
+                // Get current WASM hash before upgrading
+                let current_wasm: Option<BytesN<32>> = env.storage().instance().get(&crate::auth::DataKey::CurrentWasmHash);
+                
+                // Update the contract's WASM code
+                env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+                
+                // Store previous hash if there was a current one
+                if let Some(prev_hash) = current_wasm.clone() {
+                    env.storage().instance().set(&crate::auth::DataKey::PreviousWasmHash, &prev_hash);
+                }
+                // Update current hash to the new one
+                env.storage().instance().set(&crate::auth::DataKey::CurrentWasmHash, &new_wasm_hash);
+                
                 proposed.executed = true;
                 _log_admin_action(
                     &env,
@@ -4000,9 +4035,11 @@ impl PriceOracle {
                     AdminAction::Upgrade,
                     Some(format!("Data: {}", proposed.data.to_string())),
                 );
+                
+                // Emit ContractUpgraded event with both previous and new hashes
                 env.events().publish(
                     (Symbol::new(&env, "contract_upgraded"),),
-                    (executor.clone(),),
+                    (executor.clone(), current_wasm, new_wasm_hash),
                 );
             }
             AdminAction::Slash => {

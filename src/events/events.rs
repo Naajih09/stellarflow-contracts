@@ -104,6 +104,9 @@ pub const EV_COORD_REMOVED: Symbol = symbol_short!("coord_rem");
 /// Admin: admin ownership was transferred.
 pub const EV_ADMIN_TRANSFER: Symbol = symbol_short!("adm_xfer");
 
+/// Admin: multi-sig admin keys rotated.
+pub const EV_ADMIN_KEYS_ROTATED: Symbol = symbol_short!("rot_admin");
+
 /// Admin: emergency revocation vote was cast.
 pub const EV_REVOCATION_VOTE: Symbol = symbol_short!("revk_vote");
 
@@ -140,6 +143,54 @@ pub const EV_BALLOT_OPENED: Symbol = symbol_short!("ball_open");
 /// Governance: a revocation ballot was closed.
 pub const EV_BALLOT_CLOSED: Symbol = symbol_short!("ball_clos");
 
+/// Governance: a proposal was vetoed by the Security Council.
+pub const EV_PROPOSAL_VETOED: Symbol = symbol_short!("prop_vet");
+
+/// Orders: a trader committed to a hidden trade (commit-reveal, Issue #761).
+pub const EV_COMMIT_NEW: Symbol = symbol_short!("cmt_new");
+
+/// Orders: a commitment was revealed and executed against the order book.
+pub const EV_COMMIT_REVEAL: Symbol = symbol_short!("cmt_rev");
+
+/// Orders: a commitment's bond was forfeited after its reveal deadline passed.
+pub const EV_COMMIT_FORFEIT: Symbol = symbol_short!("cmt_frf");
+
+// ---------------------------------------------------------------------------
+// Cross-border fiat escrow settlement lifecycle
+// ---------------------------------------------------------------------------
+//
+// These topics track an escrow through its multi-stage payment state:
+// `Pending` -> `Locked` -> `Dispatched` -> `Settled`, with `Refunded` as the
+// terminal state when an anchor fails to claim within the payout window.
+//
+// Emit with the escrow id as an extra topic, e.g.:
+//   emit_simple2(env, EV_ESCROW_LOCKED, escrow_id_sym, &(sender, amount));
+
+/// Escrow: a settlement was created and is awaiting funding (`Pending`).
+pub const EV_ESCROW_PENDING: Symbol = symbol_short!("esc_pend");
+
+/// Escrow: sender funds were locked in escrow (`Locked`).
+pub const EV_ESCROW_LOCKED: Symbol = symbol_short!("esc_lock");
+
+/// Escrow: the anchor was notified and fiat dispatch is in progress
+/// (`Dispatched`).
+pub const EV_ESCROW_DISPATCHED: Symbol = symbol_short!("esc_disp");
+
+/// Escrow: the anchor signalled fiat payout completion and funds were
+/// released (`Settled`).
+pub const EV_ESCROW_SETTLED: Symbol = symbol_short!("esc_setl");
+
+/// Escrow: the anchor failed to claim within the payout window and locked
+/// funds were returned to the sender (`Refunded`).
+pub const EV_ESCROW_REFUNDED: Symbol = symbol_short!("esc_refn");
+
+/// Escrow: the anchor keypair confirmed off-chain fiat payout completion.
+pub const EV_ANCHOR_PAYOUT: Symbol = symbol_short!("anc_paid");
+
+/// Escrow: the 24-hour anchor payout deadline elapsed, triggering an
+/// automatic refund of locked funds to the sender.
+pub const EV_PAYOUT_TIMEOUT: Symbol = symbol_short!("pay_tmout");
+
 // ---------------------------------------------------------------------------
 // Core publishing function
 // ---------------------------------------------------------------------------
@@ -167,33 +218,20 @@ pub fn emit_event<D: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
         return Err(ContractError::EventTopicLimitExceeded);
     }
 
-    // Build the topic tuple in a fixed-size array, then slice it.
-    //
-    // Soroban `publish` accepts any `IntoVal` for the topics argument.
-    // A 4-element array of `Symbol` values covers the maximum case.
-    let t0 = event_name;
-    let t1 = extra_topics.get(0).copied();
-    let t2 = extra_topics.get(1).copied();
-    let t3 = extra_topics.get(2).copied();
-
-    let mut topics: Vec<Symbol> = Vec::new(env);
-    topics.push_back(t0);
-    if let Some(s) = t1 {
-        topics.push_back((*s).clone());
-    }
-    if let Some(s) = t2 {
-        topics.push_back((*s).clone());
-    }
-    if let Some(s) = t3 {
-        topics.push_back((*s).clone());
-    }
-
-    match topics.len() {
-        1 => env.events().publish((topics.get(0).unwrap(),), data),
-        2 => env.events().publish((topics.get(0).unwrap(), topics.get(1).unwrap()), data),
-        3 => env.events().publish((topics.get(0).unwrap(), topics.get(1).unwrap(), topics.get(2).unwrap()), data),
-        4 => env.events().publish((topics.get(0).unwrap(), topics.get(1).unwrap(), topics.get(2).unwrap(), topics.get(3).unwrap()), data),
-        _ => {}
+    match extra_topics.len() {
+        0 => env.events().publish((event_name,), data),
+        1 => env.events().publish((event_name, extra_topics[0].clone()), data),
+        2 => env.events().publish((event_name, extra_topics[0].clone(), extra_topics[1].clone()), data),
+        3 => env.events().publish(
+            (
+                event_name,
+                extra_topics[0].clone(),
+                extra_topics[1].clone(),
+                extra_topics[2].clone(),
+            ),
+            data,
+        ),
+        _ => return Err(ContractError::EventTopicLimitExceeded),
     }
     Ok(())
 }
@@ -206,6 +244,30 @@ pub fn validate_topics(topic_count: u32) -> Result<(), ContractError> {
     } else {
         Ok(())
     }
+}
+
+/// Event payload emitted when flash loan service fees are distributed.
+#[soroban_sdk::contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlashLoanFeesDistributedEvent {
+    pub asset: crate::AssetId,
+    pub total_amount: u64,
+    pub lp_share: u64,
+    pub treasury_share: u64,
+    pub lp_reward_pool: soroban_sdk::Address,
+    pub treasury: soroban_sdk::Address,
+}
+
+pub fn publish_flash_fees_distributed(
+    env: &Env,
+    event: FlashLoanFeesDistributedEvent,
+) {
+    let _ = emit_simple2(
+        env,
+        EV_FLASH_FEES_DISTRIBUTED,
+        Symbol::new(env, "flash_fees"),
+        event,
+    );
 }
 
 /// Return the number of topics a well-formed event would have given
@@ -258,6 +320,98 @@ pub fn emit_simple4<D: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
         event_name,
         &[&entity_type, &entity_id, &status],
         data,
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Governance Veto Event
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone)]
+pub struct ProposalVetoedEvent {
+    pub proposal_id: u64,
+    pub vetoed_by: soroban_sdk::Address,
+    pub vetoed_at: u64,
+    pub reason_hash: soroban_sdk::String,
+}
+
+/// Emit a ProposalVetoed event when the Security Council vetoes a proposal.
+///
+/// # Arguments
+/// * `env` - The contract environment
+/// * `proposal_id` - ID of the proposal that was vetoed
+/// * `vetoed_by` - Address of the Security Council that performed the veto
+/// * `vetoed_at` - Ledger timestamp of the veto
+/// * `reason` - Audit reason string (hashed in event for transparency)
+pub fn emit_proposal_vetoed(
+    env: &Env,
+    proposal_id: u64,
+    vetoed_by: soroban_sdk::Address,
+    vetoed_at: u64,
+    reason: soroban_sdk::String,
+) -> Result<(), ContractError> {
+    let proposal_id_sym = soroban_sdk::Symbol::new(env, &format!("prop_{}", proposal_id));
+    
+    let event = ProposalVetoedEvent {
+        proposal_id,
+        vetoed_by: vetoed_by.clone(),
+        vetoed_at,
+        reason_hash: reason,
+    };
+    
+    emit_simple3(
+        env,
+        EV_PROPOSAL_VETOED,
+        proposal_id_sym,
+        symbol_short!("vetoed"),
+        event,
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Governance Proposal Created Event
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone)]
+pub struct ProposalCreatedEvent {
+    pub proposal_id: u64,
+    pub creator: soroban_sdk::Address,
+    pub ipfs_cid: soroban_sdk::Bytes,
+    pub created_at: u64,
+}
+
+/// Emit a ProposalCreated event when a new governance proposal is created.
+///
+/// # Arguments
+/// * `env` - The contract environment
+/// * `proposal_id` - ID of the newly created proposal
+/// * `creator` - Address of the proposal creator
+/// * `ipfs_cid` - IPFS content hash (CID) of the full proposal documentation
+/// * `created_at` - Ledger timestamp of creation
+pub fn emit_proposal_created(
+    env: &Env,
+    proposal_id: u64,
+    creator: soroban_sdk::Address,
+    ipfs_cid: soroban_sdk::Bytes,
+    created_at: u64,
+) -> Result<(), ContractError> {
+    let proposal_id_sym = soroban_sdk::Symbol::new(env, &format!("prop_{}", proposal_id));
+    
+    let event = ProposalCreatedEvent {
+        proposal_id,
+        creator,
+        ipfs_cid,
+        created_at,
+    };
+    
+    emit_simple3(
+        env,
+        EV_PROPOSAL_CREATED,
+        symbol_short!("proposal"),
+        proposal_id_sym,
+        event,
     )
 }
 
@@ -413,13 +567,15 @@ mod tests {
             EV_UPGRADE_CANCELLED,
             EV_BALLOT_OPENED,
             EV_BALLOT_CLOSED,
+            EV_PROPOSAL_VETOED,
         ];
         for name in names.iter() {
             assert!(
-                seen.try_insert(*name, ()).is_ok(),
+                !seen.contains_key(name.clone()),
                 "duplicate event name: {:?}",
                 name
             );
+            seen.set(name.clone(), ());
         }
     }
 

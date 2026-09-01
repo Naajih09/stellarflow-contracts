@@ -105,9 +105,9 @@ pub fn emergency_unpause(
 mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events};
-    use soroban_sdk::Env;
+    use soroban_sdk::{Env, IntoVal};
 
-    fn setup() -> (Env, Address, Address, Address) {
+    fn setup() -> (Env, Address, Address, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
         let admin = Address::generate(&env);
@@ -120,6 +120,7 @@ mod tests {
             let data = ContractData {
                 admin: admin.clone(),
                 value: 0,
+                max_fee_ceiling: 0,
             };
             env.storage().instance().set(&DATA_KEY, &data);
         });
@@ -210,8 +211,8 @@ mod tests {
 
             let events = env.events().all();
             let found = events.iter().any(|e| {
-                e.0 == (contract_id.clone(),)
-                    && e.1 == (Symbol::new(&env, "EMRG_PAUSE"),)
+                e.0 == contract_id
+                    && e.1 == soroban_sdk::vec![&env, Symbol::new(&env, "EMRG_PAUSE").into_val(&env)]
             });
             assert!(found, "should emit EMRG_PAUSE event");
         });
@@ -231,8 +232,8 @@ mod tests {
 
             let events = env.events().all();
             let found = events.iter().any(|e| {
-                e.0 == (contract_id.clone(),)
-                    && e.1 == (Symbol::new(&env, "EMRG_UNPAUSE"),)
+                e.0 == contract_id
+                    && e.1 == soroban_sdk::vec![&env, Symbol::new(&env, "EMRG_UNPAUSE").into_val(&env)]
             });
             assert!(found, "should emit EMRG_UNPAUSE event");
         });
