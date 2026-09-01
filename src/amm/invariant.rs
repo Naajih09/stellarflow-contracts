@@ -51,17 +51,19 @@ impl U256 {
         let b_lo = b as u64;
         let b_hi = (b >> 64) as u64;
 
-        let lo = (a_lo as u128) * (b_lo as u128);
+        let p_lo_lo = (a_lo as u128) * (b_lo as u128);
         let cross1 = (a_hi as u128) * (b_lo as u128);
         let cross2 = (a_lo as u128) * (b_hi as u128);
-        let hi = (a_hi as u128) * (b_hi as u128);
+        let p_hi_hi = (a_hi as u128) * (b_hi as u128);
 
         let (mid, carry_mid) = cross1.overflowing_add(cross2);
         let mid_lo = mid << 64;
-        let mid_hi = (mid >> 64) + (carry_mid as u128);
+        let mid_hi = (mid >> 64).wrapping_add((carry_mid as u128) << 64);
 
-        let result_lo = (mid_lo_bits << 64) | p_lo_lo_lo;
-        let result_hi = (upper << 64) | mid_hi_bits;
+        let (result_lo, carry_lo) = p_lo_lo.overflowing_add(mid_lo);
+        let result_hi = p_hi_hi.wrapping_add(mid_hi).wrapping_add(carry_lo as u128);
+
+        debug_assert!(result_hi >> 64 <= u64::MAX as u128);
 
         U256(result_lo, result_hi)
     }
@@ -267,7 +269,7 @@ pub fn assert_invariant_stable(
     let k_after = U256::mul(reserve_in_after, reserve_out_after);
 
     if k_after.1 < k_before.1 || (k_after.1 == k_before.1 && k_after.0 < k_before.0) {
-        return Err(ContractError::Overflow);
+        return Err(ContractError::InvariantViolation);
     }
     Ok(())
 }
