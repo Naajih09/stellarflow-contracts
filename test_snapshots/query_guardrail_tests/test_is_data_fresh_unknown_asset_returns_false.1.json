@@ -96,7 +96,7 @@
                       },
                       {
                         "key": {
-                          "symbol": "TREASURY"
+                          "symbol": "TREASUR"
                         },
                         "val": {
                           "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -254,7 +254,7 @@
               }
             ],
             "data": {
-              "u32": 303994223
+              "u32": 3897123275
             }
           }
         }

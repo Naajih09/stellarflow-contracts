@@ -122,12 +122,14 @@ pub fn compute_swap_out(
         return Err(ContractError::InvalidInput);
     }
     
-    // Update volume history and get current dynamic fee
-    let fee_bps = crate::fees::update_volume_and_adjust_fee(
+    // Update volume history and derive the base dynamic fee, then apply the
+    // volatility-based adaptive scaling (Issue #766) when the pool opted in.
+    let legacy_fee_bps = crate::fees::update_volume_and_adjust_fee(
         env, 
         asset, 
         amount_in as u64
     )?;
+    let fee_bps = crate::fees::resolve_swap_fee_bps(env, asset, legacy_fee_bps)?;
     
     // Calculate raw output before fees
     let denominator = reserve_in
@@ -208,6 +210,27 @@ pub fn assert_invariant_stable(
 
     if k_after.1 < k_before.1 || (k_after.1 == k_before.1 && k_after.0 < k_before.0) {
         return Err(ContractError::Overflow);
+    }
+    Ok(())
+}
+
+/// Guard the final output of a trade path against the trader's slippage limit.
+///
+/// Evaluates the realized `amount_out` (the balance actually delivered after all
+/// intermediate pool hops have executed) against the user-defined
+/// `min_amount_out`. If the realized output falls short of the minimum, returns
+/// `ContractError::SlippageExceeded`.
+///
+/// This check is intended to run before the transaction is committed. Returning
+/// `Err` propagates up through the contract call, so the host environment rolls
+/// back every intermediate pool swap atomically — no partial state is persisted
+/// when the guard trips.
+pub fn assert_min_amount_out(
+    amount_out: u128,
+    min_amount_out: u128,
+) -> Result<(), ContractError> {
+    if amount_out < min_amount_out {
+        return Err(ContractError::SlippageExceeded);
     }
     Ok(())
 }

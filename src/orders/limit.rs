@@ -303,12 +303,15 @@ pub fn place_buy_order(
         id: next_order_id(env),
         maker,
         pair: pair.clone(),
-        side: OrderSide::Buy,
+        sell_asset: pair.sell_asset.clone(),
+        buy_asset: pair.buy_asset.clone(),
         price_tick,
+        amount: buy_amount,
         original_amount: buy_amount,
         remaining_amount: buy_amount,
         filled_amount: 0,
         created_at_ledger: env.ledger().sequence(),
+        expiry: 0,
         active: true,
     };
 

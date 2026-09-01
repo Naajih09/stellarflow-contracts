@@ -353,6 +353,26 @@ pub fn get_current_dynamic_fee(env: &Env, asset: AssetId) -> u32 {
     dynamic_fee.current_fee_bps
 }
 
+/// Resolve the swap fee to apply for a pool (Issue #766).
+///
+/// If the pool has opted into adaptive (volatility-based) fee scaling, returns
+/// the volatility-scaled fee that lies within the configured `[base, max]`
+/// band. Otherwise falls back to the provided legacy fee unchanged, so pools
+/// that never configured an [`AdaptiveFeeConfig`] keep their existing
+/// volume-based dynamic fee behavior.
+pub fn resolve_swap_fee_bps(
+    env: &Env,
+    pool: AssetId,
+    legacy_fee_bps: u32,
+) -> Result<u32, ContractError> {
+    if crate::config::get_adaptive_fee_config(env, pool).is_some() {
+        let (fee, _vol) = crate::amm::adaptive_fee::resolve_adaptive_fee(env, pool)?;
+        Ok(fee)
+    } else {
+        Ok(legacy_fee_bps)
+    }
+}
+
 /// Calculate and deduct dynamic fee from a trade amount
 pub fn calculate_and_deduct_fee(amount: u128, fee_bps: u32) -> Result<(u128, u128), ContractError> {
     // Fee is calculated as (amount * fee_bps) / 10000 (since bps is 1/100th of a percent)
