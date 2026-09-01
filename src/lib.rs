@@ -99,6 +99,7 @@ pub mod staking_tiers;
 pub mod state_verification;
 pub mod storage;
 pub mod temp_governance;
+pub mod token;
 pub mod upgrades;
 pub mod validation;
 pub mod zk;
