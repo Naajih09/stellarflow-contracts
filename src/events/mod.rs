@@ -1,4 +1,5 @@
 pub mod events;
+pub mod governance;
 pub mod liquidity;
 pub mod swaps;
 
