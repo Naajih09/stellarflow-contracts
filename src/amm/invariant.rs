@@ -214,6 +214,27 @@ pub fn assert_invariant_stable(
     Ok(())
 }
 
+/// Guard the final output of a trade path against the trader's slippage limit.
+///
+/// Evaluates the realized `amount_out` (the balance actually delivered after all
+/// intermediate pool hops have executed) against the user-defined
+/// `min_amount_out`. If the realized output falls short of the minimum, returns
+/// `ContractError::SlippageExceeded`.
+///
+/// This check is intended to run before the transaction is committed. Returning
+/// `Err` propagates up through the contract call, so the host environment rolls
+/// back every intermediate pool swap atomically — no partial state is persisted
+/// when the guard trips.
+pub fn assert_min_amount_out(
+    amount_out: u128,
+    min_amount_out: u128,
+) -> Result<(), ContractError> {
+    if amount_out < min_amount_out {
+        return Err(ContractError::SlippageExceeded);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
