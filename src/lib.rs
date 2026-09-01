@@ -281,6 +281,12 @@ const RELAYER_TTL_THRESHOLD: u32 = 5_000;
 const INSTANCE_TTL_EXTEND: u32 = 100_000;
 pub(crate) const TREASURY_KEY: Symbol = symbol_short!("TREASURY");
 pub(crate) const LP_REWARD_POOL_KEY: Symbol = symbol_short!("LPREWARD");
+pub const LP_SHARE_BPS: u32 = 8000;
+pub const TREASURY_SHARE_BPS: u32 = 2000;
+pub const FEE_TIER_005_BPS: u32 = 5;
+pub const FEE_TIER_030_BPS: u32 = 30;
+pub const FEE_TIER_100_BPS: u32 = 100;
+pub const DEFAULT_FEE_TIER_BPS: u32 = FEE_TIER_030_BPS;
 const SEQUENCE_COUNTER_KEY: Symbol = symbol_short!("SEQCTR");
 const REVOCATION_KEY: Symbol = symbol_short!("REVOKE");
 const RECOVERY_KEY: Symbol = symbol_short!("RKEY");
@@ -411,6 +417,49 @@ pub struct FiatEscrow {
 pub enum FiatEscrowKey {
     Escrow(u64),
     Counter,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct FeeTierController {
+    pub active_tier_bps: u32,
+    pub min_tier_bps: u32,
+    pub max_tier_bps: u32,
+    pub lp_share_bps: u32,
+    pub treasury_share_bps: u32,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct PoolFeeConfig {
+    pub active_tier_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PoolFeeTierProposal {
+    pub asset: AssetId,
+    pub new_tier_bps: u32,
+    pub proposer: Address,
+    pub votes: Vec<Address>,
+    pub created_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PoolFeeState {
+    pub asset: AssetId,
+    pub collected_lp_fees: u64,
+    pub collected_treasury_fees: u64,
+    pub last_updated: u64,
+}
+
+#[contracttype]
+pub enum LiquidityPoolFeeKey {
+    Controller,
+    PoolConfig(AssetId),
+    PoolState(AssetId),
+    FeeTierProposal(AssetId),
 }
 
 #[contract]
@@ -2238,6 +2287,228 @@ impl TimeLockedUpgradeContract {
         targets: Vec<admin::prune::PruneTarget>,
     ) -> Result<u32, ContractError> {
         admin::prune::prune_expired_keys(&env, &admin, &targets)
+    }
+
+    // ── Dynamic Liquidity Pool Swap Fee Tier Controller ─────────────────────
+
+    /// Initialize the fee tier controller with bounded safety ranges.
+    pub fn initialize_fee_tier_controller(
+        env: Env,
+        admin: Address,
+        default_tier_bps: u32,
+    ) -> Result<FeeTierController, ContractError> {
+        let data = Self::_load_data(&env)?;
+        if data.admin != admin {
+            return Err(ContractError::NotAdmin);
+        }
+        admin.require_auth();
+        if default_tier_bps != FEE_TIER_005_BPS
+            && default_tier_bps != FEE_TIER_030_BPS
+            && default_tier_bps != FEE_TIER_100_BPS
+        {
+            return Err(ContractError::InvalidTierConfig);
+        }
+        if env.storage().instance().has(&LiquidityPoolFeeKey::Controller) {
+            return Err(ContractError::AlreadyInitialized);
+        }
+        let controller = FeeTierController {
+            active_tier_bps: default_tier_bps,
+            min_tier_bps: FEE_TIER_005_BPS,
+            max_tier_bps: FEE_TIER_100_BPS,
+            lp_share_bps: LP_SHARE_BPS,
+            treasury_share_bps: TREASURY_SHARE_BPS,
+        };
+        env.storage().instance().set(&LiquidityPoolFeeKey::Controller, &controller);
+        let default_config = PoolFeeConfig { active_tier_bps: default_tier_bps };
+        for asset in [ID_NGN, ID_GHS, ID_CFA, ID_KES, ID_ZAR, ID_UGX] {
+            env.storage().instance().set(&LiquidityPoolFeeKey::PoolConfig(asset), &default_config);
+        }
+        Ok(controller)
+    }
+
+    /// Return the controller that enforces fee tier safety bounds.
+    pub fn get_fee_tier_controller(env: Env) -> FeeTierController {
+        env.storage().instance().get(&LiquidityPoolFeeKey::Controller).unwrap_or(FeeTierController {
+            active_tier_bps: DEFAULT_FEE_TIER_BPS,
+            min_tier_bps: FEE_TIER_005_BPS,
+            max_tier_bps: FEE_TIER_100_BPS,
+            lp_share_bps: LP_SHARE_BPS,
+            treasury_share_bps: TREASURY_SHARE_BPS,
+        })
+    }
+
+    /// Return the active fee tier for a specific pool.
+    pub fn get_pool_fee_tier(env: Env, asset: AssetId) -> u32 {
+        let config: Option<PoolFeeConfig> = env
+            .storage()
+            .instance()
+            .get(&LiquidityPoolFeeKey::PoolConfig(asset));
+        config
+            .unwrap_or(PoolFeeConfig { active_tier_bps: DEFAULT_FEE_TIER_BPS })
+            .active_tier_bps
+    }
+
+    /// Open a governance vote to adjust a pool's fee tier.
+    pub fn propose_pool_fee_tier_change(
+        env: Env,
+        proposer: Address,
+        asset: AssetId,
+        new_tier_bps: u32,
+    ) -> Result<(), ContractError> {
+        let data = Self::get_data(env.clone())?;
+        if data.admin != proposer {
+            return Err(ContractError::NotAdmin);
+        }
+        proposer.require_auth();
+        let controller = Self::get_fee_tier_controller(env.clone());
+        if new_tier_bps < controller.min_tier_bps || new_tier_bps > controller.max_tier_bps {
+            return Err(ContractError::FeeCeilingExceeded);
+        }
+        if new_tier_bps != FEE_TIER_005_BPS
+            && new_tier_bps != FEE_TIER_030_BPS
+            && new_tier_bps != FEE_TIER_100_BPS
+        {
+            return Err(ContractError::InvalidTierConfig);
+        }
+        let proposal_key = LiquidityPoolFeeKey::FeeTierProposal(asset);
+        if env.storage().instance().has(&proposal_key) {
+            return Err(ContractError::ProposalAlreadyActive);
+        }
+        let proposal = PoolFeeTierProposal {
+            asset,
+            new_tier_bps,
+            proposer: proposer.clone(),
+            votes: Vec::new(&env),
+            created_at: env.ledger().timestamp(),
+        };
+        env.storage().instance().set(&proposal_key, &proposal);
+        Ok(())
+    }
+
+    /// Cast a governance vote on a pending pool fee tier change.
+    pub fn vote_pool_fee_tier_change(
+        env: Env,
+        voter: Address,
+        asset: AssetId,
+    ) -> Result<(), ContractError> {
+        voter.require_auth();
+        let data = Self::get_data(env.clone())?;
+        if !Self::_is_signer(&env, &voter) && data.admin != voter {
+            return Err(ContractError::Unauthorized);
+        }
+        let proposal_key = LiquidityPoolFeeKey::FeeTierProposal(asset);
+        let mut proposal: PoolFeeTierProposal = env
+            .storage()
+            .instance()
+            .get(&proposal_key)
+            .ok_or(ContractError::NoActiveProposal)?;
+        for existing_voter in proposal.votes.iter() {
+            if existing_voter == &voter {
+                return Err(ContractError::AlreadyVoted);
+            }
+        }
+        proposal.votes.push(voter);
+        let threshold = Self::_revocation_threshold(&env);
+        if proposal.votes.len() >= threshold {
+            let mut config: PoolFeeConfig = env
+                .storage()
+                .instance()
+                .get(&LiquidityPoolFeeKey::PoolConfig(asset))
+                .unwrap_or(PoolFeeConfig { active_tier_bps: DEFAULT_FEE_TIER_BPS });
+            config.active_tier_bps = proposal.new_tier_bps;
+            env.storage().instance().set(&LiquidityPoolFeeKey::PoolConfig(asset), &config);
+
+            let mut controller: FeeTierController = env
+                .storage()
+                .instance()
+                .get(&LiquidityPoolFeeKey::Controller)
+                .unwrap_or(FeeTierController {
+                    active_tier_bps: DEFAULT_FEE_TIER_BPS,
+                    min_tier_bps: FEE_TIER_005_BPS,
+                    max_tier_bps: FEE_TIER_100_BPS,
+                    lp_share_bps: LP_SHARE_BPS,
+                    treasury_share_bps: TREASURY_SHARE_BPS,
+                });
+            controller.active_tier_bps = proposal.new_tier_bps;
+            env.storage().instance().set(&LiquidityPoolFeeKey::Controller, &controller);
+            env.storage().instance().remove(&proposal_key);
+        } else {
+            env.storage().instance().set(&proposal_key, &proposal);
+        }
+        Ok(())
+    }
+
+    /// Read a pending pool fee tier governance proposal.
+    pub fn get_pool_fee_tier_proposal(env: Env, asset: AssetId) -> Option<PoolFeeTierProposal> {
+        env.storage().instance().get(&LiquidityPoolFeeKey::FeeTierProposal(asset))
+    }
+
+    /// Cancel a pending pool fee tier governance proposal.
+    pub fn cancel_pool_fee_tier_change(
+        env: Env,
+        canceller: Address,
+        asset: AssetId,
+    ) -> Result<(), ContractError> {
+        let data = Self::get_data(env.clone())?;
+        if data.admin != canceller {
+            return Err(ContractError::NotAdmin);
+        }
+        canceller.require_auth();
+        let proposal_key = LiquidityPoolFeeKey::FeeTierProposal(asset);
+        if env.storage().instance().has(&proposal_key) {
+            env.storage().instance().remove(&proposal_key);
+        }
+        Ok(())
+    }
+
+    /// Record a swap fee and split it 80% to LP holders / 20% to treasury.
+    pub fn record_pool_swap_fee(
+        env: Env,
+        caller: Address,
+        asset: AssetId,
+        collected_fee: u64,
+    ) -> Result<PoolFeeState, ContractError> {
+        let data = Self::get_data(env.clone())?;
+        if data.admin != caller {
+            return Err(ContractError::NotAdmin);
+        }
+        caller.require_auth();
+        let controller = Self::get_fee_tier_controller(env.clone());
+        let lp_amount =
+            ((u128::from(collected_fee) * u128::from(controller.lp_share_bps)) / 10000) as u64;
+        let treasury_amount = collected_fee.saturating_sub(lp_amount);
+        let state_key = LiquidityPoolFeeKey::PoolState(asset);
+        let mut state: PoolFeeState = env
+            .storage()
+            .instance()
+            .get(&state_key)
+            .unwrap_or(PoolFeeState {
+                asset,
+                collected_lp_fees: 0,
+                collected_treasury_fees: 0,
+                last_updated: env.ledger().timestamp(),
+            });
+        state.collected_lp_fees = state
+            .collected_lp_fees
+            .checked_add(lp_amount)
+            .ok_or(ContractError::Overflow)?;
+        state.collected_treasury_fees = state
+            .collected_treasury_fees
+            .checked_add(treasury_amount)
+            .ok_or(ContractError::Overflow)?;
+        state.last_updated = env.ledger().timestamp();
+        env.storage().instance().set(&state_key, &state);
+        Ok(state)
+    }
+
+    /// Return the accumulated split fee state for a pool.
+    pub fn get_pool_fee_state(env: Env, asset: AssetId) -> PoolFeeState {
+        env.storage().instance().get(&LiquidityPoolFeeKey::PoolState(asset)).unwrap_or(PoolFeeState {
+            asset,
+            collected_lp_fees: 0,
+            collected_treasury_fees: 0,
+            last_updated: 0,
+        })
     }
 }
 

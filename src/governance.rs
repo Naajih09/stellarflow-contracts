@@ -467,6 +467,133 @@ pub fn cleanup_expired_proposal(env: &Env, proposal_id: Symbol) -> Result<Option
     Ok(Some(ballot.proposer))
 }
 
+pub(crate) const FEE_TIER_KEY: Symbol = symbol_short!("FEETIER");
+pub(crate) const FEE_SPLIT_KEY: Symbol = symbol_short!("FEESPLIT");
+pub(crate) const TREASURY_KEY: Symbol = symbol_short!("TREASURY");
+
+pub const LOW_FEE_TIER_BPS: u32 = 5;
+pub const MEDIUM_FEE_TIER_BPS: u32 = 30;
+pub const HIGH_FEE_TIER_BPS: u32 = 100;
+pub const DEFAULT_FEE_TIER_BPS: u32 = MEDIUM_FEE_TIER_BPS;
+pub const LP_FEE_SHARE_BPS: u32 = 8000;
+pub const TREASURY_FEE_SHARE_BPS: u32 = 2000;
+
+#[contracttype]
+#[derive(Clone)]
+pub struct FeeTierConfig {
+    pub fee_tier_bps: u32,
+    pub low_fee_tier_bps: u32,
+    pub medium_fee_tier_bps: u32,
+    pub high_fee_tier_bps: u32,
+}
+
+impl Default for FeeTierConfig {
+    fn default() -> Self {
+        Self {
+            fee_tier_bps: DEFAULT_FEE_TIER_BPS,
+            low_fee_tier_bps: LOW_FEE_TIER_BPS,
+            medium_fee_tier_bps: MEDIUM_FEE_TIER_BPS,
+            high_fee_tier_bps: HIGH_FEE_TIER_BPS,
+        }
+    }
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct FeeSplitConfig {
+    pub lp_share_bps: u32,
+    pub treasury_share_bps: u32,
+}
+
+impl Default for FeeSplitConfig {
+    fn default() -> Self {
+        Self {
+            lp_share_bps: LP_FEE_SHARE_BPS,
+            treasury_share_bps: TREASURY_FEE_SHARE_BPS,
+        }
+    }
+}
+
+pub fn get_fee_tier_config(env: &Env) -> FeeTierConfig {
+    env.storage()
+        .instance()
+        .get(&FEE_TIER_KEY)
+        .unwrap_or_default()
+}
+
+pub fn get_fee_tier(env: &Env) -> u32 {
+    get_fee_tier_config(env).fee_tier_bps
+}
+
+pub fn set_fee_tier(
+    env: &Env,
+    signers: &Vec<Address>,
+    new_fee_tier_bps: u32,
+) -> Result<(), ContractError> {
+    verify_upgrade_quorum(env, signers)?;
+    let config = get_fee_tier_config(env);
+    if new_fee_tier_bps != config.low_fee_tier_bps
+        && new_fee_tier_bps != config.medium_fee_tier_bps
+        && new_fee_tier_bps != config.high_fee_tier_bps
+    {
+        return Err(ContractError::InvalidThreshold);
+    }
+    env.storage().instance().set(&FEE_TIER_KEY, &FeeTierConfig {
+        fee_tier_bps: new_fee_tier_bps,
+        ..config
+    });
+    Ok(())
+}
+
+pub fn get_fee_split_config(env: &Env) -> FeeSplitConfig {
+    env.storage()
+        .instance()
+        .get(&FEE_SPLIT_KEY)
+        .unwrap_or_default()
+}
+
+pub fn set_fee_split_config(
+    env: &Env,
+    signers: &Vec<Address>,
+    lp_share_bps: u32,
+    treasury_share_bps: u32,
+) -> Result<(), ContractError> {
+    verify_upgrade_quorum(env, signers)?;
+    if lp_share_bps.checked_add(treasury_share_bps) != Some(10000) {
+        return Err(ContractError::InvalidThreshold);
+    }
+    env.storage().instance().set(&FEE_SPLIT_KEY, &FeeSplitConfig {
+        lp_share_bps,
+        treasury_share_bps,
+    });
+    Ok(())
+}
+
+pub fn split_collected_fees(env: &Env, amount: u128) -> Result<(u128, u128), ContractError> {
+    let config = get_fee_split_config(env);
+    let lp_amount = amount
+        .checked_mul(config.lp_share_bps as u128)
+        .ok_or(ContractError::Overflow)? / 10000;
+    let treasury_amount = amount
+        .checked_mul(config.treasury_share_bps as u128)
+        .ok_or(ContractError::Overflow)? / 10000;
+    Ok((lp_amount, treasury_amount))
+}
+
+pub fn get_treasury_vault(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&TREASURY_KEY)
+}
+
+pub fn set_treasury_vault(
+    env: &Env,
+    signers: &Vec<Address>,
+    vault: Address,
+) -> Result<(), ContractError> {
+    verify_upgrade_quorum(env, signers)?;
+    env.storage().instance().set(&TREASURY_KEY, &vault);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
