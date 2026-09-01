@@ -7,19 +7,11 @@
 use crate::NodeProfile;
 use soroban_sdk::{contracttype, Address, Env, Map, Symbol};
 
-/// Helpers and keys for short-lived calculation state.
-#[path = "storage/ephemeral.rs"]
-pub(crate) mod ephemeral;
-
-/// Fixed-size tuple-based storage keys for gas-optimized lookups.
-/// Replaces dynamic Map structures with direct tuple keys.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     /// Subscription record keyed by consumer [@address].
     Subscription(Address),
-    /// Asset price entry keyed by a [`Symbol`].
-    AssetPrice(Symbol),
 }
 
 /// NOTE: These are single-variant enums, not bare tuple structs. A single-field
@@ -29,7 +21,7 @@ pub enum DataKey {
 // collide on the exact same storage slot.
 //
 // Wrapping each in an enum adds a discriminant to the serialized value — but
-// Soroban's `#contracttype]` enum encoding namespaces only by the *variant
+// Soroban's `#[contracttype]` enum encoding namespaces only by the *variant
 // name* (as a Symbol), not by the Rust type name. Two different enums that
 // happen to share a variant name with the same field shape (e.g. two enums
 // both using a variant called `Asset(Symbol)`) still collide. Every variant
@@ -99,6 +91,16 @@ pub enum CorridorFeeKey {
     FeeByAsset(Symbol),
 }
 
+/// Tuple-based bridge validator storage key: (current set / rotation sequence).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BridgeValidatorKey {
+    /// Current trusted validator public keys.
+    BridgeValidators,
+    /// Rotation sequence number, incremented on each validator set update.
+    BridgeRotationSeq,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FeedStakeValue {
@@ -142,7 +144,7 @@ pub fn get_node_profiles(env: &Env) -> Map<Address, NodeProfile> {
 
 pub fn extend_subscription_rent(env: &Env, consumer_id: Address) {
     let key = DataKey::Subscription(consumer_id);
-    extend_persistent_ttl(env, &key);
+    env.storage().persistent().extend_ttl(&key, RENT_THRESHOLD, RENT_EXTEND_TO);
 }
 
 pub fn check_subscription(env: &Env, consumer_id: Address) -> bool {
@@ -169,7 +171,7 @@ pub fn extend_asset_rent(env: &Env, asset: Symbol) -> bool {
 /// instance-storage TTL so gating logic that depends on instance data never
 /// trips over an expired instance entry.
 pub fn preflight_rent_check(env: &Env) {
-    env.storage().instance().extend_ttl(0, ASSET_TTL_THRESHOLD);
+    env.storage().instance().extend_ttl(0, ASET_TTL_THRESHOLD);
 }
 
 /// Prune a feed stake entry that has gone stale (issue #522: storage-rent
@@ -319,12 +321,12 @@ pub struct KeyOptimizer;
 impl KeyOptimizer {
     pub fn address_to_bytes32(addr: &soroban_sdk::Address) -> soroban_sdk::BytesN<32> {
         let env = addr.env();
-        let bytes = addr.to_xdr(env);
+        let bytes = addr.clone().to_xdr(env);
         env.crypto().sha256(&bytes)
     }
 
     pub fn string_to_bytes32(env: &soroban_sdk::Env, s: &soroban_sdk::String) -> soroban_sdk::BytesN<32> {
-        let bytes = s.to_xdr(env);
+        let bytes = s.clone().to_xdr(env);
         env.crypto().sha256(&bytes)
     }
 
