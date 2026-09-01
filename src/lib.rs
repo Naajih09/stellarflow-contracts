@@ -1948,6 +1948,25 @@ impl TimeLockedUpgradeContract {
         router::multihop::execute_route(&env, &route)
     }
 
+    /// Quote a multi-hop route without writing contract state.
+    ///
+    /// This wrapper gives clients a stable contract entry point for checking
+    /// the complete path before submitting `execute_route`; the final minimum
+    /// output remains enforced by the execution call itself.
+    pub fn quote_route(env: Env, route: router::multihop::Route) -> Result<u64, ContractError> {
+        router::multihop::estimate_route(&env, &route)
+    }
+
+    /// Simulate a multi-hop route and return per-hop output, fees, and the
+    /// slippage-adjusted minimum output without mutating persistent state.
+    pub fn simulate_route(
+        env: Env,
+        route: router::multihop::Route,
+        slippage_tolerance_bps: u32,
+    ) -> Result<router::multihop::SimulatedSwapOutcome, ContractError> {
+        router::multihop::simulate_route(&env, &route, slippage_tolerance_bps)
+    }
+
     // ── Wrapped cross-chain asset mint/burn controls (Issue #692) ───────────
 
     pub fn register_wrapped_asset(
