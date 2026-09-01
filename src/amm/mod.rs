@@ -1,1 +1,6 @@
-pub mod circuit_breaker;pub mod invariant;pub mod slippage;pub mod ticks;pub const ALLOWED_FEE_TIERS_BPS:[u16;3]=[5,30,100];pub const LP_SHARE_BPS:u64=8000;pub const TREASURY_SHARE_BPS:u64=2000;pub struct FeeTierController{fee_tier_bps:u16}impl FeeTierController{pub fn new()->Self{Self{fee_tier_bps:30}}pub fn set_fee_tier(&mut self,tier:u16)->Result<>,&'static str>{if ALLOWED_FEE_TIERS_BPS.contains(&tier){self.fee_tier_bps=tier;Ok(()}else{Err("invalid fee tier")}}pub fn governance_set_fee_tier(&mut self,tier:u16,for_votes:u64,against_votes:u64)->Result<>,&'static str>{if for_votes>against_votes{self.set_fee_tier(tier)}else{Err"(governance failed")}}pub fn split_fees(&self,total:u64)->(u64,u64){let treasury=total*TREASURY_SHARE_BPS/10000;(total-treasury,treasury)}}
+pub mod adaptive_fee;
+pub mod circuit_breaker;
+pub mod deviation_guard;
+pub mod invariant;
+pub mod slippage;
+pub mod ticks;

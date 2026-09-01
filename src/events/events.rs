@@ -146,6 +146,51 @@ pub const EV_BALLOT_CLOSED: Symbol = symbol_short!("ball_clos");
 /// Governance: a proposal was vetoed by the Security Council.
 pub const EV_PROPOSAL_VETOED: Symbol = symbol_short!("prop_vet");
 
+/// Orders: a trader committed to a hidden trade (commit-reveal, Issue #761).
+pub const EV_COMMIT_NEW: Symbol = symbol_short!("cmt_new");
+
+/// Orders: a commitment was revealed and executed against the order book.
+pub const EV_COMMIT_REVEAL: Symbol = symbol_short!("cmt_rev");
+
+/// Orders: a commitment's bond was forfeited after its reveal deadline passed.
+pub const EV_COMMIT_FORFEIT: Symbol = symbol_short!("cmt_frf");
+
+// ---------------------------------------------------------------------------
+// Cross-border fiat escrow settlement lifecycle
+// ---------------------------------------------------------------------------
+//
+// These topics track an escrow through its multi-stage payment state:
+// `Pending` -> `Locked` -> `Dispatched` -> `Settled`, with `Refunded` as the
+// terminal state when an anchor fails to claim within the payout window.
+//
+// Emit with the escrow id as an extra topic, e.g.:
+//   emit_simple2(env, EV_ESCROW_LOCKED, escrow_id_sym, &(sender, amount));
+
+/// Escrow: a settlement was created and is awaiting funding (`Pending`).
+pub const EV_ESCROW_PENDING: Symbol = symbol_short!("esc_pend");
+
+/// Escrow: sender funds were locked in escrow (`Locked`).
+pub const EV_ESCROW_LOCKED: Symbol = symbol_short!("esc_lock");
+
+/// Escrow: the anchor was notified and fiat dispatch is in progress
+/// (`Dispatched`).
+pub const EV_ESCROW_DISPATCHED: Symbol = symbol_short!("esc_disp");
+
+/// Escrow: the anchor signalled fiat payout completion and funds were
+/// released (`Settled`).
+pub const EV_ESCROW_SETTLED: Symbol = symbol_short!("esc_setl");
+
+/// Escrow: the anchor failed to claim within the payout window and locked
+/// funds were returned to the sender (`Refunded`).
+pub const EV_ESCROW_REFUNDED: Symbol = symbol_short!("esc_refn");
+
+/// Escrow: the anchor keypair confirmed off-chain fiat payout completion.
+pub const EV_ANCHOR_PAYOUT: Symbol = symbol_short!("anc_paid");
+
+/// Escrow: the 24-hour anchor payout deadline elapsed, triggering an
+/// automatic refund of locked funds to the sender.
+pub const EV_PAYOUT_TIMEOUT: Symbol = symbol_short!("pay_tmout");
+
 // ---------------------------------------------------------------------------
 // Core publishing function
 // ---------------------------------------------------------------------------
