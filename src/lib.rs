@@ -127,6 +127,24 @@ use crate::validation::{
 
 use crate::upgrades::migration::ensure_schema_version;
 
+/// Centralised contract error enum — closes issue #720.
+///
+/// The `#[contracterror]` attribute makes every variant available as a typed
+/// `soroban_sdk::Error` value on the host, so callers can pattern-match on
+/// specific error codes rather than treating all failures as opaque integers.
+///
+/// Discriminant layout:
+/// - 1–11 : initialisation / admin lifecycle
+/// - 12–19: auth / signature errors
+/// - 20–29: stake / tier errors
+/// - 30–49: protocol logic errors
+/// - 50–63: module-specific errors (reentrancy, merkle, governance)
+/// - 64+  : new errors added after the initial audit
+///
+/// The four canonical *external-API* error codes required by issue #720 are
+/// exposed as `const` aliases below the enum definition so they remain stable
+/// regardless of any future renumbering inside the enum body.
+#[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum ContractError {
@@ -257,6 +275,18 @@ impl ContractError {
     pub const HarvestSwapFailed: Self = Self::RouteExecutionFailed;
     pub const HarvestSlippageExceeded: Self = Self::SlippageExceeded;
     pub const HarvestInvalidPath: Self = Self::InconsistentRouteAssets;
+
+    // ── Issue #720 canonical API error aliases ────────────────────────────────
+    // These four names are the stable external-facing identifiers documented in
+    // the public ABI. Client SDKs SHOULD match against these variants by name.
+    //
+    // InsufficientBalance => code 31 (InsufficientReserveBalance)
+    // Unauthorized        => code 12 (primary variant, no alias needed)
+    // SlippageExceeded    => code 47 (primary variant, no alias needed)
+    // ExpiredDeadline     => code 64 (primary variant, no alias needed)
+
+    /// Canonical alias: operation failed due to insufficient token balance.
+    pub const InsufficientBalance: Self = Self::InsufficientReserveBalance;
 }
 
 // Contract state keys

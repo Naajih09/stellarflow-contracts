@@ -96,6 +96,10 @@ pub struct DynamicFeeState {
 }
 
 impl DynamicFeeState {
+    pub fn new_default() -> Self {
+        Self::new()
+    }
+
     fn new() -> Self {
         Self {
             min_fee_bps: 5,    // 0.05%
