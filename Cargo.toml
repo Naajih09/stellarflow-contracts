@@ -15,6 +15,7 @@ members = [
     "contracts/liquidity-lock",
     "contracts/linear-vesting",
     "contracts/price-oracle",
+    "contracts/remittance-escrow",
     "contracts/reward-splitter",
     "contracts/gas-tank",
     "contracts/relayer-allowance",
