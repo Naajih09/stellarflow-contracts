@@ -25,6 +25,8 @@ pub enum DataKey {
     PendingAdminTimestamp,
     AdminUpdateTimestamp,
     RecentEvents,
+    /// Mapping of relayer address -> accumulated reward balance
+    Rewards,
     Initialized,
     /// TWAP Buffer: Stores last 10 (Timestamp, Price) updates.
     Twap(Symbol),
@@ -75,10 +77,76 @@ pub enum DataKey {
     MinQuorumThreshold,
     /// Staked collateral balance for a relayer/provider (i128, in token stroops).
     ProviderStake(Address),
+    /// Consecutive missed-block infractions for a relayer/provider.
+    ProviderConsecutiveMissedBlocks(Address),
+    /// Uptime streak start timestamp used to reset slashing multipliers after 48h
+    /// of uninterrupted healthy operation.
+    ProviderUptimeStreakStart(Address),
+    /// The exact ledger height of the provider's last successful price update.
+    ProviderLastSeenLedger(Address),
     /// The SEP-41 token contract address used for staking and slashing.
     SlashToken,
-    /// The address of the ecosystem insurance reserve that receives slashed funds.
+    /// The address of the insurance reserve that receives slashed funds.
     InsuranceReserve,
+    /// The SEP-41 token contract address used for query fee collection.
+    FeeToken,
+    /// Legacy aggregate fee vault balance; retained for migration compatibility only.
+    FeeVaultBalance,
+    /// Asset-isolated fee vault balance keyed by the SEP-41 fee token address.
+    CorridorFeeVaultBalance(Address),
+    /// The pending reward balance for a relayer/validator.
+    ProviderRewardBalance(Address),
+
+    // ── Issue #264: per-admin signature weight ────────────────────────────────
+    /// Governance weight assigned to a specific admin (u32, 0–100).
+    ///
+    /// Used by the multi-sig weight-accumulation algorithm: before executing a
+    /// proposed action the contract sums the weights of all voters and checks
+    /// the total against `WeightThreshold`. Defaults to 1 when unset so that
+    /// legacy single-weight deployments continue to work without migration.
+    AdminWeight(Address),
+    /// Minimum cumulative weight required for a governance proposal to execute.
+    ///
+    /// When unset the contract falls back to the simple vote-count threshold
+    /// returned by `_get_required_threshold` (expressed as weight units where
+    /// each admin contributes 1 unit).
+    WeightThreshold,
+
+    // ── Liquidity validation: flash loan manipulation prevention ──────────────
+    /// Minimum liquidity threshold required for price submissions (in stroops).
+    ///
+    /// When set, price submissions must include liquidity data that meets or
+    /// exceeds this threshold. Submissions from thin markets are rejected early
+    /// to prevent flash loan price manipulation attacks.
+    LiquidityThreshold(Symbol),
+    /// Last reported liquidity value from a provider for a specific asset.
+    ///
+    /// Tracked for reputation scoring and slash enforcement. Key structure:
+    /// (provider_address, asset_symbol) => liquidity_value_stroops.
+    ProviderReportedLiquidity(Address, Symbol),
+    /// Timestamp of the last successful liquidity validation for an asset.
+    ///
+    /// Used for audit trails and monitoring liquidity validation frequency.
+    LastLiquidityValidation(Symbol),
+
+    // ── Issue #263: isolated OracleHealth slots ───────────────────────────────
+    /// Isolated slot: number of active relayers (whitelisted providers).
+    HealthActiveRelayers,
+    /// Isolated slot: whether the contract is currently paused.
+    HealthPaused,
+    /// Isolated slot: total number of tracked assets.
+    HealthTotalAssets,
+    /// Isolated slot: last ledger sequence number at which health was written.
+    HealthLastLedger,
+    /// The ledger sequence number when the oracle last resumed from a halt.
+    /// Used to ignore tracking metrics (TWAP, RecentEvents) from before the recovery.
+    BaselineLedger,
+    /// Last recorded deviation (in basis points) between a provider's submitted
+    /// price and the consensus median.  Written on every `report_price_deviation`
+    /// call for audit and off-chain indexing purposes.
+    ProviderLastDeviationBps(Address),
+    /// Gas Tank escrow contract address for relayer reimbursement (Issue #266).
+    GasTank,
 }
 
 /// Decimal metadata for an asset pair.
@@ -110,6 +178,26 @@ pub struct AssetInfo {
     pub quote_decimals: u32,
 }
 
+/// Configuration for atomic asset registration and initialization.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetRegistrationConfig {
+    /// Asset symbol for this registration.
+    pub asset: Symbol,
+    /// Short human-readable asset name.
+    pub name: Symbol,
+    /// Native decimal precision of the base asset.
+    pub base_decimals: u32,
+    /// Native decimal precision of the quote asset.
+    pub quote_decimals: u32,
+    /// Minimum allowed price for the asset pair.
+    pub min_price: i128,
+    /// Maximum allowed price for the asset pair.
+    pub max_price: i128,
+    /// Optional absolute floor price for the asset.
+    pub price_floor: Option<i128>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssetWeight {
@@ -124,6 +212,8 @@ pub struct PriceData {
     pub price: i128,
     /// Ledger timestamp when this price was written.
     pub timestamp: u64,
+    /// Exact ledger sequence number for this price write.
+    pub ledger_sequence: u32,
     /// Address that provided the price update.
     pub provider: Address,
     /// Number of decimals for the price value.
@@ -305,17 +395,4 @@ pub struct ProposedAction {
     pub executed: bool,
     /// Whether the action has been cancelled.
     pub cancelled: bool,
-}
-
-/// A weighted component of a multi-asset index basket.
-///
-/// Used by `get_index_price` to compute a weighted average across assets.
-/// `weight` is expressed in basis points (e.g. 4000 = 40%).
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AssetWeight {
-    /// The asset symbol (e.g. NGN, KES, GHS).
-    pub asset: Symbol,
-    /// Weight in basis points (0–10000). All weights in a basket should sum to 10000.
-    pub weight: u32,
 }
