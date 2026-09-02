@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 2,
+    "address": 3,
     "nonce": 0
   },
   "auth": [
@@ -15,6 +15,9 @@
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 }
               ]
             }
@@ -38,6 +41,18 @@
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                },
+                {
+                  "u64": 0
+                },
+                {
+                  "bytes": "7365742d76616c75652d31"
+                },
+                {
+                  "bytes": "222a23b0ef9f554cd05bc46dfaef7f7d53b4722b5e8b8f6f430adfe601139f67"
+                },
+                {
+                  "u64": 18446744073709551615
                 }
               ]
             }
@@ -63,6 +78,18 @@
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                },
+                {
+                  "u64": 1
+                },
+                {
+                  "bytes": "7365742d76616c75652d32"
+                },
+                {
+                  "bytes": "7dab7291dd7654bd8d6446d5c92aa55963f03f7c3d91265d81e1efefdb37db7f"
+                },
+                {
+                  "u64": 18446744073709551615
                 }
               ]
             }
@@ -83,6 +110,108 @@
     "min_temp_entry_ttl": 0,
     "max_entry_ttl": 4294967295,
     "ledger_entries": [
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "symbol": "HBEAT"
+            },
+            "durability": "temporary"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "symbol": "HBEAT"
+                },
+                "durability": "temporary",
+                "val": {
+                  "map": [
+                    {
+                      "key": {
+                        "u32": 1
+                      },
+                      "val": {
+                        "u64": 301
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          15
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "State"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "State"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "map": [
+                    {
+                      "key": {
+                        "symbol": "nonce"
+                      },
+                      "val": {
+                        "u64": 2
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "salt_signature"
+                      },
+                      "val": {
+                        "bytes": "7dab7291dd7654bd8d6446d5c92aa55963f03f7c3d91265d81e1efefdb37db7f"
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          4095
+        ]
+      ],
       [
         {
           "contract_data": {
@@ -133,19 +262,27 @@
                       },
                       {
                         "key": {
-                          "symbol": "HBEAT"
+                          "symbol": "SEQCTR"
                         },
                         "val": {
                           "map": [
                             {
                               "key": {
-                                "symbol": "VALUE"
+                                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                               },
                               "val": {
-                                "u64": 301
+                                "u64": 1
                               }
                             }
                           ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "symbol": "TREASUR"
+                        },
+                        "val": {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                         }
                       }
                     ]
@@ -300,7 +437,14 @@
               }
             ],
             "data": {
-              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+              "vec": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                }
+              ]
             }
           }
         }
@@ -347,7 +491,7 @@
               }
             ],
             "data": {
-              "symbol": "VALUE"
+              "u32": 1
             }
           }
         }
@@ -402,6 +546,18 @@
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                },
+                {
+                  "u64": 0
+                },
+                {
+                  "bytes": "7365742d76616c75652d31"
+                },
+                {
+                  "bytes": "222a23b0ef9f554cd05bc46dfaef7f7d53b4722b5e8b8f6f430adfe601139f67"
+                },
+                {
+                  "u64": 18446744073709551615
                 }
               ]
             }
@@ -450,7 +606,7 @@
               }
             ],
             "data": {
-              "symbol": "VALUE"
+              "u32": 1
             }
           }
         }
@@ -499,7 +655,7 @@
               }
             ],
             "data": {
-              "symbol": "VALUE"
+              "u32": 1
             }
           }
         }
@@ -548,7 +704,7 @@
               }
             ],
             "data": {
-              "symbol": "VALUE"
+              "u32": 1
             }
           }
         }
@@ -603,6 +759,18 @@
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                },
+                {
+                  "u64": 1
+                },
+                {
+                  "bytes": "7365742d76616c75652d32"
+                },
+                {
+                  "bytes": "7dab7291dd7654bd8d6446d5c92aa55963f03f7c3d91265d81e1efefdb37db7f"
+                },
+                {
+                  "u64": 18446744073709551615
                 }
               ]
             }
@@ -651,7 +819,7 @@
               }
             ],
             "data": {
-              "symbol": "VALUE"
+              "u32": 1
             }
           }
         }

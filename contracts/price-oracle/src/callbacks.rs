@@ -1,4 +1,4 @@
-use soroban_sdk::{Address, Env, Symbol, Vec, IntoVal};
+use soroban_sdk::{Address, Bytes, BytesN, Env, IntoVal, Symbol, Vec};
 
 use crate::types::{DataKey, PriceUpdatePayload};
 
@@ -18,12 +18,12 @@ pub fn get_subscribers(env: &Env) -> Vec<Address> {
 ///
 /// # Returns
 /// Returns `Err` if the contract is already subscribed to prevent duplicates.
-pub fn subscribe(env: &Env, callback_contract: Address) -> Result<(), crate::Error> {
+pub fn subscribe(env: &Env, callback_contract: Address) -> Result<(), crate::ContractError> {
     let mut subscribers = get_subscribers(env);
 
     // Check if already subscribed
     if subscribers.iter().any(|sub| sub == callback_contract) {
-        return Err(crate::Error::AlreadyInitialized);
+        return Err(crate::ContractError::AlreadyInitialized);
     }
 
     subscribers.push_back(callback_contract);
@@ -42,7 +42,7 @@ pub fn subscribe(env: &Env, callback_contract: Address) -> Result<(), crate::Err
 ///
 /// # Returns
 /// Returns `Err` if the contract is not found in the subscriber list.
-pub fn unsubscribe(env: &Env, callback_contract: &Address) -> Result<(), crate::Error> {
+pub fn unsubscribe(env: &Env, callback_contract: &Address) -> Result<(), crate::ContractError> {
     let mut subscribers = get_subscribers(env);
 
     // Find and remove the subscriber
@@ -63,7 +63,7 @@ pub fn unsubscribe(env: &Env, callback_contract: &Address) -> Result<(), crate::
     }
 
     if !found {
-        return Err(crate::Error::AssetNotFound);
+        return Err(crate::ContractError::AssetNotFound);
     }
 
     env.storage()
@@ -88,7 +88,11 @@ pub fn unsubscribe(env: &Env, callback_contract: &Address) -> Result<(), crate::
 ///   processing other subscribers. This ensures one failed callback doesn't block updates.
 /// - Gas considerations: Callbacks consume gas; if too many subscribers exist,
 ///   the transaction might fail due to gas limits. Consider pagination if needed.
+/// - Reentrancy protection: Acquires a lock before invoking callbacks to prevent
+///   reentrant calls that could manipulate contract state during callback execution.
 pub fn notify_subscribers(env: &Env, payload: &PriceUpdatePayload) {
+    crate::reentrancy::acquire_lock(env);
+    
     let subscribers = get_subscribers(env);
 
     for subscriber in subscribers.iter() {
@@ -99,19 +103,35 @@ pub fn notify_subscribers(env: &Env, payload: &PriceUpdatePayload) {
         // from blocking all price updates. However, in a production system,
         // you might want to log these errors to an event or metrics system.
     }
+    
+    crate::reentrancy::release_lock(env);
 }
 
 /// Attempt to invoke the `on_price_update` callback on a single contract.
 ///
 /// This uses dynamic invocation to call the standardized callback interface.
 /// The callback contract must implement the `on_price_update(payload: PriceUpdatePayload)` function.
-fn try_invoke_callback(env: &Env, callback_contract: &Address, payload: &PriceUpdatePayload) -> Result<(), crate::Error> {
+fn try_invoke_callback(
+    env: &Env,
+    callback_contract: &Address,
+    payload: &PriceUpdatePayload,
+) -> Result<(), crate::ContractError> {
     env.invoke_contract::<()>(
         callback_contract,
         &Symbol::new(env, "on_price_update"),
         soroban_sdk::vec![env, payload.into_val(env)],
     );
     Ok(())
+}
+
+/// Verify an off-ramp anchor gateway attestation over the transaction id.
+pub fn verify_anchor_attestation(
+    env: &Env,
+    gateway_public_key: &BytesN<32>,
+    tx_id: &Bytes,
+    signature: &BytesN<64>,
+) -> bool {
+    env.crypto().ed25519_verify(gateway_public_key, tx_id, signature)
 }
 
 #[cfg(test)]
@@ -182,5 +202,15 @@ mod tests {
 
         // Unsubscribe from empty list fails
         assert!(unsubscribe(&env, &contract).is_err());
+    }
+
+    #[test]
+    fn test_verify_anchor_attestation_rejects_invalid_signature() {
+        let env = Env::default();
+        let key = BytesN::from_array(&env, &[1u8; 32]);
+        let tx_id = Bytes::from_array(&env, &[9u8, 8u8, 7u8, 6u8]);
+        let signature = BytesN::from_array(&env, &[2u8; 64]);
+
+        assert!(!verify_anchor_attestation(&env, &key, &tx_id, &signature));
     }
 }
