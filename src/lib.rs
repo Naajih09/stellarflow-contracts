@@ -2028,6 +2028,36 @@ impl TimeLockedUpgradeContract {
         bridge::rate_limit::get_limit(&env, bridge::rate_limit::RateLimitAsset::Wrapped(asset_code))
     }
 
+    // --- Cross-chain bridge validator threshold (Issue #721) ---
+
+    /// Set the minimum number of unique registered validator signatures
+    /// required for a bridge unlock.
+    pub fn configure_bridge_threshold(
+        env: Env,
+        admin: Address,
+        threshold: u32,
+    ) -> Result<(), ContractError> {
+        bridge::relayer::configure_threshold(&env, &admin, threshold)
+    }
+
+    /// Register an Ed25519 public key as an authorized bridge validator.
+    pub fn add_bridge_validator(
+        env: Env,
+        admin: Address,
+        pubkey: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        bridge::relayer::add_validator(&env, &admin, pubkey)
+    }
+
+    /// Remove an Ed25519 public key from the authorized bridge validator set.
+    pub fn remove_bridge_validator(
+        env: Env,
+        admin: Address,
+        pubkey: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        bridge::relayer::remove_validator(&env, &admin, pubkey)
+    }
+
     // --- Native bridge escrow (Issue #750) ---
 
     pub fn configure_bridge_escrow(

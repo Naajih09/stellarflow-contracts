@@ -49,6 +49,7 @@ pub struct TokenLock {
 pub struct UnlockProof {
     pub proof_hash: BytesN<32>,
     pub source_chain_id: u32,
+    pub nonce: u64,
     pub recipient: Address,
     pub amount: i128,
 }
@@ -210,7 +211,15 @@ pub fn unlock_tokens(
         return Err(ContractError::BridgeInvalidAmount);
     }
 
-    relayer::verify_cross_chain_payload(env, proof.proof_hash.clone(), signatures)?;
+    relayer::verify_cross_chain_payload(
+        env,
+        proof.source_chain_id,
+        proof.nonce,
+        proof.proof_hash.clone(),
+        proof.recipient.clone(),
+        proof.amount,
+        signatures,
+    )?;
     let config = load_config(env)?;
 
     // Invariant check: verify balance consistency before state change
