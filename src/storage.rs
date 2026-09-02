@@ -7,32 +7,27 @@
 use crate::NodeProfile;
 use soroban_sdk::{contracttype, Address, Env, Map, Symbol};
 
-/// --- Standardized TTL Constants as per Issue #715 ---
-/// Threshold: If TTL is below this, we bump (10,000 ledgers)
-pub const THRESHOLD: u32 = 10_000;
-/// Bump Amount: Extend by this much (100_000 ledgers)
-pub const BUMP_AMOUNT: u32 = 100_000;
-
-// Re-mapping existing logic to use the new strict constants for backward compatibility
-pub const RENT_THRESHOLD: u32 = THRESHOLD;
-pub const RENT_EXTEND_TO: u32 = BUMP_AMOUNT;
-pub const ASET_TTL_THRESHOLD: u32 = THRESHOLD;
-pub const ASET_TTL_EXTEND_TO: u32 = BUMP_AMOUNT;
-pub const PROFILE_TTL_THRESHOLD: u32 = THRESHOLD;
-pub const PERSISTENT_TTL_THRESHOLD: u32 = THRESHOLD;
-
-/// Helpers and keys for short-lived calculation state.
-#[path = "storage/ephemeral.rs"]
-pub(crate) mod ephemeral;
-
-/// Fixed-size tuple-based storage keys for gas-optimized lookups.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Subscription(Address),
-    AssetPrice(Symbol),
 }
 
+/// NOTE: These are single-variant enums, not bare tuple structs. A single-field
+// tuple struct like `pub struct StakeKey(Address)` serializes to a plain
+// `Vec![address]` with no type tag, so two different bare tuple-struct types
+// wrapping the same address (e.g. StakeKey(addr) and RevokedSignerKey(addr))
+// collide on the exact same storage slot.
+//
+// Wrapping each in an enum adds a discriminant to the serialized value — but
+// Soroban's `#[contracttype]` enum encoding namespaces only by the *variant
+// name* (as a Symbol), not by the Rust type name. Two different enums that
+// happen to share a variant name with the same field shape (e.g. two enums
+// both using a variant called `Asset(Symbol)`) still collide. Every variant
+// name below is therefore kept globally unique across the whole contract's
+// storage keys, not just unique within its own enum.
+
+/// Tuple-based stake storage key: (node_address) -> stake_amount
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StakeKey {
@@ -130,7 +125,7 @@ pub fn get_node_profiles(env: &Env) -> Map<Address, NodeProfile> {
 
 pub fn extend_subscription_rent(env: &Env, consumer_id: Address) {
     let key = DataKey::Subscription(consumer_id);
-    extend_persistent_ttl(env, &key);
+    env.storage().persistent().extend_ttl(&key, RENT_THRESHOLD, RENT_EXTEND_TO);
 }
 
 pub fn check_subscription(env: &Env, consumer_id: Address) -> bool {
@@ -156,7 +151,7 @@ pub fn extend_asset_rent(env: &Env, asset: Symbol) -> bool {
 /// Pre-flight rent check for storage entries: extends the contract's own
 /// instance-storage TTL using strict 10k/100k policy.
 pub fn preflight_rent_check(env: &Env) {
-    extend_instance_ttl(env);
+    env.storage().instance().extend_ttl(0, ASET_TTL_THRESHOLD);
 }
 
 pub fn check_and_prune_feed_stake(env: &Env, node: Address, asset: u32) -> bool {
@@ -229,7 +224,12 @@ pub struct KeyOptimizer;
 impl KeyOptimizer {
     pub fn address_to_bytes32(addr: &soroban_sdk::Address) -> soroban_sdk::BytesN<32> {
         let env = addr.env();
-        let bytes = addr.to_xdr(env);
+        let bytes = addr.clone().to_xdr(env);
+        env.crypto().sha256(&bytes)
+    }
+
+    pub fn string_to_bytes32(env: &soroban_sdk::Env, s: &soroban_sdk::String) -> soroban_sdk::BytesN<32> {
+        let bytes = s.clone().to_xdr(env);
         env.crypto().sha256(&bytes)
     }
 
